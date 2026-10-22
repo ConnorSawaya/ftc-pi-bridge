@@ -1,0 +1,12 @@
+[Unit]
+Description=Forward ADB from the USB link to the Control Hub
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/adb-forward.py
+Restart=always
+RestartSec=2
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target

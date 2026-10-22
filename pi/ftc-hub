@@ -1,0 +1,77 @@
+#!/bin/bash
+# Manage the robots (Control Hubs) this Pi knows. The Mac app and the `ftc-bridge` command
+# run this over SSH, as root via sudo:
+#   ftc-hub status        ->  robot=<name>, ssid=<wifi>, hub=up|down, and one saved=<name><TAB><wifi> per robot
+#   ftc-hub scan          ->  nearby Wi-Fi names, one per line
+#   ftc-hub list          ->  saved robots, one <name><TAB><wifi> per line
+#   ftc-hub add NAME      ->  saves a robot; reads its Wi-Fi name, then password, from stdin (one per line)
+#   ftc-hub use NAME      ->  switches the Pi to that robot's Wi-Fi
+#   ftc-hub forget NAME   ->  deletes a saved robot
+set -euo pipefail
+HUB_IP=192.168.43.1
+PREFIX=robot-  # each robot is a NetworkManager connection called robot-<name>
+
+wifi_on() {  # Raspberry Pi OS starts with Wi-Fi switched off in NetworkManager
+  rfkill unblock wifi 2>/dev/null || true
+  nmcli radio wifi on
+}
+check_name() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]{1,32}$ ]] ||
+    { echo "Robot names can use letters, numbers, . _ - (up to 32)"; exit 1; }
+}
+saved() { nmcli -t -g NAME con show | sed -n "s/^$PREFIX//p"; }
+ssid_of() { nmcli -g 802-11-wireless.ssid con show "$PREFIX$1"; }
+require_saved() {
+  saved | grep -qxF "$1" || { echo "No saved robot called '$1'. Saved: $(saved | tr '\n' ' ')"; exit 1; }
+}
+
+case "${1:-}" in
+  status)
+    ROBOT="$(nmcli -t -g NAME con show --active | sed -n "s/^$PREFIX//p" | head -1)"
+    echo "robot=$ROBOT"
+    echo "ssid=$([[ -n "$ROBOT" ]] && ssid_of "$ROBOT" || true)"
+    if ping -c1 -W1 "$HUB_IP" >/dev/null 2>&1; then echo "hub=up"; else echo "hub=down"; fi
+    for r in $(saved); do printf 'saved=%s\t%s\n' "$r" "$(ssid_of "$r")"; done
+    ;;
+  scan)
+    wifi_on
+    for _ in 1 2 3; do  # right after the radio turns on, the first scan can come back empty
+      LIST="$(nmcli -g SSID dev wifi list --rescan auto 2>/dev/null | sed 's/\\:/:/g' | grep -v '^$' | sort -u || true)"
+      [[ -n "$LIST" ]] && break
+      sleep 3
+    done
+    [[ -z "$LIST" ]] || printf '%s\n' "$LIST"
+    ;;
+  list)
+    for r in $(saved); do printf '%s\t%s\n' "$r" "$(ssid_of "$r")"; done
+    ;;
+  add)
+    NAME="${2:-}"; check_name "$NAME"
+    IFS= read -r SSID; IFS= read -r PSK
+    [[ ${#SSID} -ge 1 && ${#SSID} -le 32 ]] || { echo "Wi-Fi name must be 1-32 characters"; exit 1; }
+    [[ ${#PSK} -ge 8 && ${#PSK} -le 63 ]] || { echo "Password must be 8-63 characters"; exit 1; }
+    nmcli con delete "$PREFIX$NAME" >/dev/null 2>&1 || true
+    # The password is briefly in nmcli's argv; fine on this single-user Pi.
+    nmcli con add type wifi con-name "$PREFIX$NAME" ifname wlan0 ssid "$SSID" \
+      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no >/dev/null
+    echo "Saved $NAME ($SSID)"
+    ;;
+  use)
+    NAME="${2:-}"; check_name "$NAME"; require_saved "$NAME"
+    wifi_on
+    # Only the chosen robot reconnects by itself (e.g. after the Pi restarts).
+    for r in $(saved); do nmcli con modify "$PREFIX$r" connection.autoconnect no; done
+    nmcli con modify "$PREFIX$NAME" connection.autoconnect yes
+    nmcli --wait 20 con up "$PREFIX$NAME" >/dev/null 2>&1 ||
+      { echo "Couldn't join $NAME ($(ssid_of "$NAME")). Is the robot on? A wrong password also causes this."; exit 1; }
+    echo "Connected to $NAME"
+    ;;
+  forget)
+    NAME="${2:-}"; check_name "$NAME"; require_saved "$NAME"
+    nmcli con delete "$PREFIX$NAME" >/dev/null
+    echo "Forgot $NAME"
+    ;;
+  *)
+    echo "usage: ftc-hub status|scan|list|add NAME|use NAME|forget NAME" >&2; exit 2
+    ;;
+esac

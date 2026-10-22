@@ -1,0 +1,25 @@
+# Build output
+mac/build/
+build/
+*.apk
+
+# Generated SD-card config (can contain Wi-Fi names) and anything secret
+user-data
+network-config
+meta-data
+.env*
+*.pem
+*.key
+id_*
+*.keystore
+*.jks
+
+# Never commit robot code, robot configs, or team files into this repo
+TeamCode/
+FtcRobotController/
+*.xml
+local.properties
+
+# Machine files
+.DS_Store
+xcuserdata/

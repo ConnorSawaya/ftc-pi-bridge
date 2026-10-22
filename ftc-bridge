@@ -1,0 +1,116 @@
+#!/bin/bash
+# ftc-bridge: control the Pi bridge from the terminal (for you or an AI agent).
+#
+#   ftc-bridge status               which robot the Pi is on, and whether its hub answers
+#   ftc-bridge robots               saved robots (name, Wi-Fi name)
+#   ftc-bridge scan                 nearby Wi-Fi networks
+#   ftc-bridge add NAME WIFI_NAME   save a robot; the password is read from stdin (asked if typing)
+#   ftc-bridge use NAME             switch the Pi to that robot
+#   ftc-bridge forget NAME          delete a saved robot
+#
+#   Run these from the robot project folder:
+#   ftc-bridge upload [NAME]        send code to the robot. Uses Sloth hot reload (~1 s) if the
+#                                   project has it, otherwise a full install. NAME switches robot first.
+#   ftc-bridge upload --full [NAME] full install + app restart (needed after changing libraries
+#                                   or Gradle files, or code outside the teamcode package)
+#   ftc-bridge test                 run the TeamCode unit tests on this Mac (no robot needed)
+#
+#   ftc-bridge logs [--errors] [N]  last N lines (default 300) of the robot's log
+#   ftc-bridge adb ARGS...          any adb command against the robot, e.g. adb push x /sdcard/FIRST/
+#
+# Example for an agent:  printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC
+set -euo pipefail
+
+PI="ftc@10.12.194.1"
+ADB_SERIAL="10.12.194.1:5555"
+RC_ACTIVITY="com.qualcomm.ftcrobotcontroller/org.firstinspires.ftc.robotcontroller.internal.PermissionValidatorWrapper"
+ADB="$(command -v adb || echo "$HOME/Library/Android/sdk/platform-tools/adb")"
+STUDIO_JAVA="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+
+die() { echo "error: $*" >&2; exit 1; }
+check_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "robot names can use letters, numbers, . _ - (up to 32)"; }
+
+# Run ftc-hub on the Pi. The Pi gets a new host key every reflash and sits on a direct
+# USB cable, so its key isn't pinned.
+pi() {
+  local rc=0
+  ssh -i "$HOME/.ssh/ftcpi" -o BatchMode=yes -o ConnectTimeout=3 -o LogLevel=ERROR \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$PI" sudo /usr/local/bin/ftc-hub "$@" || rc=$?
+  [[ $rc -eq 255 ]] && die "can't reach the Pi. Is it plugged into this Mac?"
+  return $rc
+}
+
+field() { sed -n "s/^$1=//p"; }
+
+status() {
+  local s robot ssid hub
+  s="$(pi status)"
+  robot="$(field robot <<<"$s")"; ssid="$(field ssid <<<"$s")"; hub="$(field hub <<<"$s")"
+  if [[ -z "$robot" ]]; then echo "Pi plugged in, no robot chosen (ftc-bridge use NAME)"; return 1
+  elif [[ "$hub" == up ]]; then echo "Connected to $robot ($ssid), hub reachable"
+  else echo "Set to $robot ($ssid), but the hub isn't answering. Is the robot on?"; return 1
+  fi
+}
+
+# Make sure adb is talking to the robot through the Pi, and only to it.
+connect_adb() {
+  status >&2
+  "$ADB" disconnect "$ADB_SERIAL" >/dev/null 2>&1 || true  # drop any connection to a previous robot
+  "$ADB" connect "$ADB_SERIAL" | grep -q 'connected to' || die "adb couldn't connect through the Pi"
+  export ANDROID_SERIAL="$ADB_SERIAL"  # Gradle and plain `adb` now only target the robot
+}
+
+gradle() {
+  [[ -x ./gradlew ]] || die "run this from your robot project folder (the one with gradlew)"
+  # Gradle needs a JDK; Android Studio ships one, and this Mac may have no other.
+  if [[ -z "${JAVA_HOME:-}" ]] && ! /usr/libexec/java_home >/dev/null 2>&1; then export JAVA_HOME="$STUDIO_JAVA"; fi
+  ./gradlew "$@"
+}
+
+has_sloth() { grep -qsi sloth TeamCode/build.gradle* build.gradle* build.dependencies.gradle; }
+
+case "${1:-}" in
+  status) status ;;
+  robots) pi list ;;
+  scan) pi scan ;;
+  add)
+    NAME="${2:-}"; SSID="${3:-}"
+    check_name "$NAME"; [[ -n "$SSID" ]] || die "usage: ftc-bridge add NAME WIFI_NAME"
+    if [[ -t 0 ]]; then read -r -s -p "Wi-Fi password for $SSID: " PSK; echo; else IFS= read -r PSK; fi
+    printf '%s\n%s\n' "$SSID" "$PSK" | pi add "$NAME"
+    ;;
+  use) check_name "${2:-}"; pi use "$2" ;;
+  forget) check_name "${2:-}"; pi forget "$2" ;;
+  upload)
+    FULL=""; [[ "${2:-}" == "--full" ]] && { FULL=1; shift; }
+    if [[ -n "${2:-}" ]]; then check_name "$2"; pi use "$2"; fi
+    [[ -x ./gradlew ]] || die "run this from your robot project folder (the one with gradlew)"
+    connect_adb
+    if [[ -z "$FULL" ]] && has_sloth; then
+      # Sloth (Dairy Foundation) hot-reloads the teamcode package; it applies when the current OpMode ends.
+      gradle :TeamCode:deploySloth
+      echo "Uploaded with Sloth. Changes load when the current OpMode stops."
+    else
+      # Sloth's hot-loaded code survives installs and would override the new app, so clear it first.
+      if has_sloth; then gradle :TeamCode:removeSlothRemote :TeamCode:installDebug; else gradle :TeamCode:installDebug; fi
+      "$ADB" shell am start -n "$RC_ACTIVITY" >/dev/null
+      echo "Full install done. Robot Controller app restarted."
+    fi
+    ;;
+  test) gradle :TeamCode:testDebugUnitTest ;;
+  logs)
+    shift; FILTER=()
+    [[ "${1:-}" == "--errors" ]] && { FILTER=('*:E'); shift; }
+    connect_adb >/dev/null
+    "$ADB" logcat -d -t "${1:-300}" ${FILTER[@]+"${FILTER[@]}"}  # -d: a snapshot, never a live stream (rule R704.D)
+    ;;
+  adb)
+    shift
+    connect_adb >/dev/null
+    "$ADB" "$@"
+    ;;
+  *)
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2
+    ;;
+esac
