@@ -811,33 +811,36 @@ struct Panel: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: 56)
+            } else if newNetworks.count <= 5 {
+                networkRows   // short list: exactly as tall as it needs
             } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(newNetworks, id: \.self) { network in
-                            let robotLike = looksLikeRobot(network)
-                            let picked = network == ssid
-                            HoverRow(action: { ssid = network }) { _ in
-                                HStack(spacing: 8) {
-                                    Image(systemName: robotLike ? "antenna.radiowaves.left.and.right" : "wifi")
-                                        .frame(width: 18)
-                                        .foregroundStyle(robotLike ? Color.accentColor : Color.secondary)
-                                    Text(network).lineLimit(1)
-                                        .foregroundStyle(robotLike ? Color.primary : Color.secondary)
-                                    Spacer()
-                                    if picked { Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor) }
-                                }
-                            }
-                            .background(RoundedRectangle(cornerRadius: 6).fill(picked ? Color.accentColor.opacity(0.15) : .clear))
-                        }
-                    }
-                    .padding(2)
-                }
-                .frame(height: min(CGFloat(newNetworks.count) * 30 + 6, 160))
+                ScrollView { networkRows }.frame(height: 160)
             }
         }
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
+    }
+
+    private var networkRows: some View {
+        VStack(spacing: 0) {
+            ForEach(newNetworks, id: \.self) { network in
+                let robotLike = looksLikeRobot(network)
+                let picked = network == ssid
+                HoverRow(action: { ssid = network }) { _ in
+                    HStack(spacing: 8) {
+                        Image(systemName: robotLike ? "antenna.radiowaves.left.and.right" : "wifi")
+                            .frame(width: 18)
+                            .foregroundStyle(robotLike ? Color.accentColor : Color.secondary)
+                        Text(network).lineLimit(1)
+                            .foregroundStyle(robotLike ? Color.primary : Color.secondary)
+                        Spacer()
+                        if picked { Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor) }
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 6).fill(picked ? Color.accentColor.opacity(0.15) : .clear))
+            }
+        }
+        .padding(2)
     }
 
     private func closeForm() {

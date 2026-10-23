@@ -9,6 +9,11 @@ Mac ──USB──► Raspberry Pi Zero 2 W ──Wi-Fi──► Control Hub
 
 > Not yet tested end-to-end with a Control Hub.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
+  <img alt="The FTC Bridge menu bar app: robot health, a crash alert, adding a robot, and settings" src="docs/screenshot-light.png">
+</picture>
+
 ## Parts
 - Raspberry Pi Zero 2 W (a Pi 4 or Pi 5 also works, through its USB-C port; the Pi 5 also has 5 GHz Wi-Fi)
 - microSD card, 16–32 GB
