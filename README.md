@@ -57,6 +57,26 @@ ftc-bridge adb ARGS...          any adb command, sent to the robot through the P
 An agent passes the password on stdin, so it isn't in the command line:
 `printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC`
 
+## AI apps (MCP)
+`mcp/server.py` gives AI apps these tools: `status`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `disconnect`. It needs [uv](https://docs.astral.sh/uv/) (`brew install uv`); uv installs the rest the first time.
+
+**Claude Code:**
+```bash
+claude mcp add --scope user ftc-bridge -- uv run /path/to/ftc-pi-bridge/mcp/server.py
+```
+
+**Claude desktop app:** add to `~/Library/Application Support/Claude/claude_desktop_config.json`, then restart the app:
+```json
+{ "mcpServers": { "ftc-bridge": { "command": "/opt/homebrew/bin/uv", "args": ["run", "/path/to/ftc-pi-bridge/mcp/server.py"] } } }
+```
+
+**Codex:** add to `~/.codex/config.toml`:
+```toml
+[mcp_servers.ftc-bridge]
+command = "uv"
+args = ["run", "/path/to/ftc-pi-bridge/mcp/server.py"]
+```
+
 Paste this into your robot repo's `CLAUDE.md` / `AGENTS.md`:
 > To upload robot code: run `ftc-bridge robots` and make sure you know which robot the user means (ask if unclear). Then run `ftc-bridge upload <name>` from the project root. If it fails, run `ftc-bridge status` and report what it says.
 
@@ -75,6 +95,7 @@ Paste this into your robot repo's `CLAUDE.md` / `AGENTS.md`:
 | `pi/no-gateway.conf` | Keeps the Mac's internet on its own Wi-Fi |
 | `pi/ftc-hub` | Saves and switches robots on the Pi |
 | `ftc-bridge` | The terminal command |
+| `mcp/server.py` | The MCP server for AI apps |
 | `mac/` | The FTC Bridge menu bar app |
 
 ## License
