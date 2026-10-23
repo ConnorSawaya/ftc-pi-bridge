@@ -24,8 +24,7 @@ Mac ──USB──► Raspberry Pi Zero 2 W ──Wi-Fi──► Control Hub
 
 ## Every time
 1. Plug in the Pi and turn on the robot. The menu bar icon shows radio waves when it's connected.
-2. `adb connect 10.12.194.1:5555`
-3. In Android Studio, pick the Control Hub and press Run.
+2. In Android Studio, pick the Control Hub and press Run. The app connects adb for you (without the app: `adb connect 10.12.194.1:5555`).
 
 **Different robot?** Click it in the menu bar app, or `ftc-bridge use practice`.
 
@@ -36,7 +35,9 @@ Mac ──USB──► Raspberry Pi Zero 2 W ──Wi-Fi──► Control Hub
 | radio waves, crossed out | Pi plugged in, robot not reachable (robot off, or none chosen) |
 | plug | Pi not plugged in |
 
-The ⚙ button has settings (open at login, robot name in the menu bar, notifications) and Pi controls: **Disconnect from robot**, **Restart Pi**, **Shut down Pi**.
+**Open Panels** opens the robot's Panels dashboard (telemetry, graphs, OpMode control, Limelight) in your browser at `http://localhost:8001`, through the Pi. The robot code needs Panels.
+
+The ⚙ button has settings (open at login, robot name in the menu bar, connect Android Studio, notifications) and Pi controls: **Disconnect from robot**, **Restart Pi**, **Shut down Pi**.
 
 ## Terminal command (for you or an AI agent)
 ```
@@ -52,13 +53,14 @@ ftc-bridge upload [NAME]        send code to the robot (run in the robot project
 ftc-bridge upload --full [NAME] full install + app restart (after changing libraries)
 ftc-bridge test                 run the TeamCode unit tests (no robot needed)
 ftc-bridge logs [--errors] [N]  the robot's recent log
+ftc-bridge panels [--stop]      open the robot's Panels dashboard at http://localhost:8001
 ftc-bridge adb ARGS...          any adb command, sent to the robot through the Pi
 ```
 An agent passes the password on stdin, so it isn't in the command line:
 `printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC`
 
 ## AI apps (MCP)
-`mcp/server.py` gives AI apps these tools: `status`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `disconnect`. It needs [uv](https://docs.astral.sh/uv/) (`brew install uv`); uv installs the rest the first time.
+`mcp/server.py` gives AI apps these tools: `status`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `open_panels`, `read_telemetry` (live Panels values), `disconnect`. It needs [uv](https://docs.astral.sh/uv/) (`brew install uv`); uv installs the rest the first time.
 
 **Claude Code:**
 ```bash

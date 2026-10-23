@@ -1,16 +1,21 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["mcp>=2.3,<3"]
+# dependencies = ["mcp>=2.3,<3", "websockets>=13"]
 # ///
 """MCP server for ftc-pi-bridge: lets an AI app check the robot, switch robots, and upload code.
 
 Each tool runs the matching `ftc-bridge` command and returns what it printed.
 Run with:  uv run mcp/server.py   (uv installs the MCP library the first time)
 """
+import asyncio
+import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
+
+import websockets
 
 from mcp.server.mcpserver import MCPServer
 
@@ -98,6 +103,52 @@ def logs(errors_only: bool = False, lines: int = 300) -> str:
     """The robot's recent log (a snapshot). Check it after an upload for crashes."""
     args = ["logs", "--errors", str(lines)] if errors_only else ["logs", str(lines)]
     return run(*args)
+
+
+@mcp.tool()
+def open_panels() -> str:
+    """Tunnel the robot's Panels dashboard to this Mac and return its address (http://localhost:8001).
+
+    Open that address in a browser to see telemetry, graphs, OpMode controls and the Limelight.
+    """
+    return run("panels", "--no-open")
+
+
+@mcp.tool()
+async def read_telemetry(seconds: float = 3.0) -> str:
+    """Listen to the robot's live Panels data for a few seconds and return the latest of each kind.
+
+    Panels sends JSON messages {pluginID, messageID, data}; telemetry lines come from the
+    telemetry plugin. An OpMode has to be running (started from the Driver Station) for most
+    values to update.
+    """
+    setup = run("panels", "--no-open")
+    if setup.startswith("FAILED"):
+        return setup
+    latest: dict[str, object] = {}
+    count = 0
+    try:
+        async with websockets.connect("ws://localhost:8002", open_timeout=5) as ws:
+            end = time.monotonic() + min(max(seconds, 0.5), 30)
+            while (left := end - time.monotonic()) > 0:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=left)
+                except asyncio.TimeoutError:
+                    break
+                count += 1
+                try:
+                    msg = json.loads(raw)
+                    latest[f"{msg.get('pluginID')}/{msg.get('messageID')}"] = msg.get("data")
+                except (ValueError, AttributeError):
+                    latest["(not JSON)"] = str(raw)[:500]
+    except (OSError, websockets.exceptions.WebSocketException) as e:
+        return f"FAILED: couldn't read Panels live data ({e}). Is Panels in the robot code and the robot app running?"
+    if not latest:
+        return f"Connected, but no messages in {seconds:g} s. Start an OpMode from the Driver Station."
+    out = json.dumps(latest, indent=1, default=str)
+    if len(out) > MAX_OUTPUT:
+        out = out[:MAX_OUTPUT] + "\n…(cut)…"
+    return f"{count} messages in {seconds:g} s; latest of each kind:\n{out}"
 
 
 @mcp.tool()

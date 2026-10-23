@@ -5,6 +5,28 @@ import ServiceManagement
 import SwiftUI
 import UserNotifications
 
+/// Runs a program and returns whether it succeeded and what it printed. `input` goes to its stdin.
+func execute(_ path: String, _ args: [String], input: String? = nil) async -> (ok: Bool, output: String) {
+    await withCheckedContinuation { done in
+        DispatchQueue.global().async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = args
+            let stdout = Pipe(), stdin = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stdout
+            process.standardInput = stdin
+            do { try process.run() } catch { return done.resume(returning: (false, "\(error)")) }
+            if let input { stdin.fileHandleForWriting.write(Data(input.utf8)) }
+            try? stdin.fileHandleForWriting.close()
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            done.resume(returning: (process.terminationStatus == 0, text))
+        }
+    }
+}
+
 enum Pi {
     static let login = "ftc@10.12.194.1"
     static let key = NSHomeDirectory() + "/.ssh/ftcpi"
@@ -12,30 +34,43 @@ enum Pi {
     /// Runs `ftc-hub <args>` on the Pi. `input` goes to its stdin, so the Wi-Fi
     /// password never appears in a command line.
     static func run(_ args: [String], input: String? = nil) async -> (ok: Bool, output: String) {
-        await withCheckedContinuation { done in
-            DispatchQueue.global().async {
-                let ssh = Process()
-                ssh.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-                ssh.arguments = [
-                    "-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "LogLevel=ERROR",
-                    // The Pi gets a new host key each time its card is reflashed, and it's on
-                    // a direct USB cable, so don't pin the key.
-                    "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                    login, "sudo", "/usr/local/bin/ftc-hub",
-                ] + args
-                let stdout = Pipe(), stdin = Pipe()
-                ssh.standardOutput = stdout
-                ssh.standardError = stdout
-                ssh.standardInput = stdin
-                do { try ssh.run() } catch { return done.resume(returning: (false, "\(error)")) }
-                if let input { stdin.fileHandleForWriting.write(Data(input.utf8)) }
-                try? stdin.fileHandleForWriting.close()
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                ssh.waitUntilExit()
-                let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                done.resume(returning: (ssh.terminationStatus == 0, text))
-            }
-        }
+        await execute("/usr/bin/ssh", [
+            "-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "LogLevel=ERROR",
+            // The Pi gets a new host key each time its card is reflashed, and it's on
+            // a direct USB cable, so don't pin the key.
+            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            login, "sudo", "/usr/local/bin/ftc-hub",
+        ] + args, input: input)
+    }
+}
+
+/// adb on this Mac, talking to the robot through the Pi's forwarder.
+enum ADB {
+    static let serial = "10.12.194.1:5555"
+    /// Panels: 8001 web page, 8002 live data (the page connects to <its own host>:8002);
+    /// 5800/5801/5805/5807: the Limelight, which the Panels Limelight plugin passes through the hub.
+    static let panelsPorts = [8001, 8002, 5800, 5801, 5805, 5807]
+
+    /// Apps opened from Finder don't get the shell's PATH, so look in the usual places.
+    static let path: String? = [
+        NSHomeDirectory() + "/Library/Android/sdk/platform-tools/adb",
+        "/opt/homebrew/bin/adb",
+        "/usr/local/bin/adb",
+    ].first { FileManager.default.isExecutableFile(atPath: $0) }
+
+    static func run(_ args: [String]) async -> (ok: Bool, output: String) {
+        guard let path else { return (false, "adb not found. Install Android Studio (it includes adb).") }
+        return await execute(path, args)
+    }
+
+    /// Fresh connection to whichever robot the Pi is on now (drops a stale one to the last robot).
+    static func connect() async -> Bool {
+        _ = await run(["disconnect", serial])
+        return await run(["connect", serial]).output.contains("connected to")
+    }
+
+    static func isConnected() async -> Bool {
+        await run(["-s", serial, "get-state"]).output == "device"
     }
 }
 
@@ -54,6 +89,11 @@ func robotName(from ssid: String) -> String {
 enum Prefs {
     static let showName = "showRobotNameInMenuBar"
     static let notify = "notifyOnConnectionChange"
+    static let autoADB = "connectAndroidStudioAutomatically"
+
+    static func register() {
+        UserDefaults.standard.register(defaults: [autoADB: true])
+    }
 }
 
 @MainActor
@@ -70,6 +110,7 @@ final class Bridge: ObservableObject {
     @Published var busy = false
     @Published var scanning = false
     private var checkedOnce = false    // no notification for the state the app starts in
+    private var adbRobot = ""          // robot adb is connected to, so a switch reconnects it
 
     init() {
         Task { while true { await refresh(); try? await Task.sleep(for: .seconds(5)) } }
@@ -130,6 +171,15 @@ final class Bridge: ObservableObject {
         } else {
             link = .noPi
         }
+        // Keep adb connected to the robot so it shows up in Android Studio by itself.
+        if link == .connected && UserDefaults.standard.bool(forKey: Prefs.autoADB) && ADB.path != nil {
+            let stillConnected = adbRobot == robot ? await ADB.isConnected() : false
+            if !stillConnected {
+                adbRobot = await ADB.connect() ? robot : ""
+            }
+        } else if link != .connected {
+            adbRobot = ""
+        }
         if checkedOnce && before != link {
             if link == .connected { notify("Connected to \(robot)", "Ready to upload.") }
             else if before == .connected { notify("Lost the robot", subtitle) }
@@ -161,6 +211,26 @@ final class Bridge: ObservableObject {
 
     func forget(_ name: String) async {
         _ = await perform("Forgetting \(name)…") { await Pi.run(["forget", name]) }
+    }
+
+    /// Tunnels the robot's Panels dashboard to this Mac and opens it in the browser.
+    func openPanels() async {
+        busy = true
+        messageIsError = false
+        message = "Opening Panels…"
+        defer { busy = false }
+        if !(await ADB.isConnected()) {
+            guard await ADB.connect() else {
+                return showError(ADB.path == nil ? "adb not found. Install Android Studio (it includes adb)." : "Couldn't reach the robot. Is it on?")
+            }
+            adbRobot = robot
+        }
+        for port in ADB.panelsPorts {
+            let result = await ADB.run(["-s", ADB.serial, "forward", "tcp:\(port)", "tcp:\(port)"])
+            if !result.ok { return showError("Port \(port) is busy on this Mac. Close what's using it and try again.") }
+        }
+        message = ""
+        NSWorkspace.shared.open(URL(string: "http://localhost:8001")!)
     }
 
     func disconnect() async {
@@ -284,6 +354,7 @@ struct Panel: View {
 
     @AppStorage(Prefs.showName) private var showName = false
     @AppStorage(Prefs.notify) private var notify = false
+    @AppStorage(Prefs.autoADB) private var autoADB = true
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var confirmShutdown = false
 
@@ -329,6 +400,10 @@ struct Panel: View {
 
     @ViewBuilder private var mainPage: some View {
         header
+        if bridge.link == .connected {
+            ActionRow(icon: "chart.xyaxis.line", title: "Open Panels", detail: "Telemetry, graphs, OpMode control",
+                      enabled: !bridge.busy) { Task { await bridge.openPanels() } }
+        }
         if bridge.link != .noPi {
             Divider()
             robotList
@@ -486,7 +561,7 @@ struct Panel: View {
     // MARK: Settings page
 
     private var version: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2"
     }
 
     @ViewBuilder private var settingsPage: some View {
@@ -505,6 +580,7 @@ struct Panel: View {
             SectionTitle(text: "GENERAL")
             SwitchRow(title: "Open at login", isOn: Binding(get: { openAtLogin }, set: setOpenAtLogin))
             SwitchRow(title: "Robot name in menu bar", isOn: $showName)
+            SwitchRow(title: "Connect Android Studio", detail: "The robot shows up in Android Studio by itself", isOn: $autoADB)
             SwitchRow(title: "Notifications", detail: "When the robot connects or drops", isOn: Binding(get: { notify }, set: setNotify))
         }
 
@@ -592,6 +668,10 @@ struct MenuBarLabel: View {
 @main
 struct FTCBridgeApp: App {
     @StateObject private var bridge = Bridge()
+
+    init() {
+        Prefs.register()
+    }
 
     var body: some Scene {
         MenuBarExtra {

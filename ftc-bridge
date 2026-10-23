@@ -18,6 +18,7 @@
 #   ftc-bridge test                 run the TeamCode unit tests on this Mac (no robot needed)
 #
 #   ftc-bridge logs [--errors] [N]  last N lines (default 300) of the robot's log
+#   ftc-bridge panels [--stop]      open the robot's Panels dashboard on this Mac (http://localhost:8001)
 #   ftc-bridge adb ARGS...          any adb command against the robot, e.g. adb push x /sdcard/FIRST/
 #
 # Example for an agent:  printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC
@@ -28,6 +29,9 @@ ADB_SERIAL="10.12.194.1:5555"
 RC_ACTIVITY="com.qualcomm.ftcrobotcontroller/org.firstinspires.ftc.robotcontroller.internal.PermissionValidatorWrapper"
 ADB="$(command -v adb || echo "$HOME/Library/Android/sdk/platform-tools/adb")"
 STUDIO_JAVA="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+# Panels: 8001 web page, 8002 live data (the page connects to <its own host>:8002);
+# 5800/5801/5805/5807: the Limelight, which the Panels Limelight plugin passes through the hub.
+PANELS_PORTS="8001 8002 5800 5801 5805 5807"
 
 die() { echo "error: $*" >&2; exit 1; }
 check_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "robot names can use letters, numbers, . _ - (up to 32)"; }
@@ -110,12 +114,24 @@ case "${1:-}" in
     connect_adb >/dev/null
     "$ADB" logcat -d -t "${1:-300}" ${FILTER[@]+"${FILTER[@]}"}  # -d: a snapshot, never a live stream (rule R704.D)
     ;;
+  panels)
+    if [[ "${2:-}" == "--stop" ]]; then
+      for p in $PANELS_PORTS; do "$ADB" forward --remove "tcp:$p" >/dev/null 2>&1 || true; done
+      echo "Panels tunnels closed."; exit 0
+    fi
+    connect_adb >/dev/null
+    for p in $PANELS_PORTS; do
+      "$ADB" forward "tcp:$p" "tcp:$p" >/dev/null || die "port $p is busy on this Mac (close whatever uses it)"
+    done
+    echo "Panels: http://localhost:8001"
+    [[ "${2:-}" == "--no-open" ]] || open "http://localhost:8001"
+    ;;
   adb)
     shift
     connect_adb >/dev/null
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac
