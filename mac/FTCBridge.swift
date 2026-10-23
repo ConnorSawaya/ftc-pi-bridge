@@ -68,6 +68,7 @@ final class Bridge: ObservableObject {
     @Published var message = ""        // shown only while working or after a problem
     @Published var messageIsError = false
     @Published var busy = false
+    @Published var scanning = false
     private var checkedOnce = false    // no notification for the state the app starts in
 
     init() {
@@ -146,12 +147,11 @@ final class Bridge: ObservableObject {
 
     func scan() async {
         busy = true
-        messageIsError = false
-        message = "Looking for robots…"
+        scanning = true
+        message = ""
         let result = await Pi.run(["scan"])
-        nearby = result.ok ? result.output.split(separator: "\n").map(String.init) : []
-        messageIsError = !result.ok
-        message = !result.ok ? "Couldn't reach the Pi" : nearby.isEmpty ? "No Wi-Fi networks found. Is the robot on?" : ""
+        if result.ok { nearby = result.output.split(separator: "\n").map(String.init) } else { showError("Couldn't reach the Pi") }
+        scanning = false
         busy = false
     }
 
@@ -307,9 +307,15 @@ struct Panel: View {
 
     // MARK: Main page
 
-    /// Scan results, minus robots already saved.
+    /// Scan results, minus robots already saved; ones that look like robots first.
     private var newNetworks: [String] {
-        bridge.nearby.filter { network in !bridge.robots.contains { $0.ssid == network } }
+        let unsaved = bridge.nearby.filter { network in !bridge.robots.contains { $0.ssid == network } }
+        return unsaved.filter(looksLikeRobot) + unsaved.filter { !looksLikeRobot($0) }
+    }
+
+    /// FTC robot Wi-Fi names: FTC-xxxx (Control Hub default), 12345-RC, DIRECT-xx (phone RCs), "Control Hub".
+    private func looksLikeRobot(_ network: String) -> Bool {
+        network.range(of: #"ftc|-rc$|^[0-9]{3,5}-|^direct-|control ?hub"#, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private var finalName: String { name.isEmpty ? robotName(from: ssid) : name }
@@ -384,7 +390,7 @@ struct Panel: View {
     private var addButton: some View {
         Button {
             adding = true
-            if bridge.nearby.isEmpty { Task { await bridge.scan() } }
+            Task { await bridge.scan() }
         } label: {
             Label("Add robot", systemImage: "plus")
         }
@@ -398,29 +404,14 @@ struct Panel: View {
             HStack {
                 SectionTitle(text: "ADD ROBOT")
                 Spacer()
-                Button { Task { await bridge.scan() } } label: { Label("Scan", systemImage: "arrow.clockwise") }
+                Button { Task { await bridge.scan() } } label: { Label("Rescan", systemImage: "arrow.clockwise") }
                     .buttonStyle(.borderless)
                     .font(.caption)
                     .disabled(bridge.busy)
             }
-            if !newNetworks.isEmpty {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(newNetworks, id: \.self) { network in
-                            HoverRow(action: { ssid = network }) { _ in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "wifi").foregroundStyle(.secondary)
-                                    Text(network).lineLimit(1)
-                                    Spacer()
-                                    if network == ssid { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
-                                }
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 112)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
-            }
+            networkPicker
+            Text("Pick your robot's Wi-Fi, or type its name below.")
+                .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
             Group {
                 TextField("Wi-Fi name", text: $ssid)
                 SecureField("Wi-Fi password", text: $password)
@@ -440,6 +431,51 @@ struct Panel: View {
             }
         }
         .padding(.horizontal, 4)
+    }
+
+    /// The list of nearby Wi-Fi to pick the robot from. Always shown while adding a robot.
+    private var networkPicker: some View {
+        Group {
+            if newNetworks.isEmpty {
+                HStack(spacing: 8) {
+                    if bridge.scanning {
+                        ProgressView().controlSize(.small)
+                        Text("Looking for robots…")
+                    } else {
+                        Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                        Text("No new robots found. Is the robot on?")
+                    }
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 56)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(newNetworks, id: \.self) { network in
+                            let robotLike = looksLikeRobot(network)
+                            let picked = network == ssid
+                            HoverRow(action: { ssid = network }) { _ in
+                                HStack(spacing: 8) {
+                                    Image(systemName: robotLike ? "antenna.radiowaves.left.and.right" : "wifi")
+                                        .frame(width: 18)
+                                        .foregroundStyle(robotLike ? Color.accentColor : Color.secondary)
+                                    Text(network).lineLimit(1)
+                                        .foregroundStyle(robotLike ? Color.primary : Color.secondary)
+                                    Spacer()
+                                    if picked { Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.accentColor) }
+                                }
+                            }
+                            .background(RoundedRectangle(cornerRadius: 6).fill(picked ? Color.accentColor.opacity(0.15) : .clear))
+                        }
+                    }
+                    .padding(2)
+                }
+                .frame(height: min(CGFloat(newNetworks.count) * 30 + 6, 160))
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
     }
 
     private func closeForm() {
