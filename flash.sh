@@ -73,12 +73,18 @@ $(indent "$HERE/pi/no-gateway.conf")
     permissions: "0755"
     content: |
 $(indent "$HERE/pi/ftc-hub")
+  - path: /etc/systemd/system.conf.d/watchdog.conf
+    content: |
+      [Manager]
+      # Restart the Pi by itself if it ever freezes.
+      RuntimeWatchdogSec=15
 runcmd:
   - [systemctl, enable, --now, ssh]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, adb-forward.service]
   - [rfkill, unblock, wifi]
   - [nmcli, radio, wifi, "on"]
+  - [mkdir, -p, /var/log/journal]  # keep logs across restarts, to see why a freeze happened
 EOF
 
 if [[ -n "$DRY_RUN" ]]; then echo "Wrote $OUT/user-data"; exit 0; fi
