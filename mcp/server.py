@@ -99,10 +99,32 @@ def run_tests(project: str | None = None) -> str:
 
 
 @mcp.tool()
-def logs(errors_only: bool = False, lines: int = 300) -> str:
-    """The robot's recent log (a snapshot). Check it after an upload for crashes."""
-    args = ["logs", "--errors", str(lines)] if errors_only else ["logs", str(lines)]
+def logs(errors_only: bool = False, lines: int = 300, since_mark: bool = False) -> str:
+    """The robot's recent log. Instant while the FTC Bridge app records the log (it does by default).
+
+    since_mark=True returns everything since the last upload or mark_log, which is usually what you
+    want after uploading and running an OpMode. errors_only keeps errors, fatals and markers.
+    """
+    args = ["logs", str(lines)]
+    if errors_only:
+        args.append("--errors")
+    if since_mark:
+        args.append("--since-mark")
     return run(*args)
+
+
+@mcp.tool()
+def search_logs(pattern: str, lines: int = 20000) -> str:
+    """Search the robot's log for a regex (any case), with 2 lines of context, up to 200 lines.
+    E.g. a tag, an OpMode name, "Exception", or a telemetry key the code logs."""
+    return run("search", pattern, str(lines))
+
+
+@mcp.tool()
+def mark_log(note: str) -> str:
+    """Write a marker into the recorded log (e.g. "user is testing the intake now"), so
+    logs(since_mark=True) returns only what happens after it. Uploads add one by themselves."""
+    return run("mark", note)
 
 
 @mcp.tool()

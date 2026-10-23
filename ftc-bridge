@@ -22,8 +22,14 @@
 #                                   Backs up the robot first.
 #   ftc-bridge test                 run the TeamCode unit tests on this Mac (no robot needed)
 #
-#   ftc-bridge logs [--errors] [N]  last N lines (default 300) of the robot's log
+#   ftc-bridge logs [--errors] [--since-mark] [N]
+#                                   last N lines (default 300) of the robot's log; --since-mark: everything
+#                                   since the last upload or `mark`
+#   ftc-bridge search PATTERN [N]   lines matching PATTERN (regex, any case) in the last N lines, with context
 #   ftc-bridge crashes [N]          crashes and exceptions in the last N log lines (default 3000)
+#   ftc-bridge mark TEXT            write a marker line into the recorded log (e.g. "starting intake test")
+#   ftc-bridge record               keep recording the robot's log on this Mac (the app runs this), so the
+#                                   log commands above read it instantly
 #   ftc-bridge backup               save the robot's configs and app to this Mac (newest 5 kept per robot)
 #   ftc-bridge backups              list backups
 #   ftc-bridge restore ROBOT/TIME [--force]   put a backup's app and configs back on the robot
@@ -51,6 +57,9 @@ BACKUPS="$HOME/Library/Application Support/ftc-pi-bridge/backups"
 KEEP_BACKUPS=5
 # What the FTC SDK and Android log when robot code throws, freezes or crashes the app.
 CRASH_PATTERN='User code threw an uncaught exception|User OpMode was stuck in|FATAL EXCEPTION'
+LOG_DIR="$HOME/Library/Logs/ftc-bridge"
+ROBOT_LOG="$LOG_DIR/robot.log"           # the recorder appends here; rotated to robot.log.1 at 20 MB
+RECORDER_PID="$LOG_DIR/recorder.pid"
 
 die() { echo "error: $*" >&2; exit 1; }
 check_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "robot names can use letters, numbers, . _ - (up to 32)"; }
@@ -89,6 +98,27 @@ connect_adb() {
   "$ADB" disconnect "$ADB_SERIAL" >/dev/null 2>&1 || true  # drop any connection to a previous robot
   "$ADB" connect "$ADB_SERIAL" | grep -q 'connected to' || die "adb couldn't connect through the Pi"
   export ANDROID_SERIAL="$ADB_SERIAL"  # Gradle and plain `adb` now only target the robot
+}
+
+# For commands that only read: reuse adb's connection if it's up (fast), else connect.
+quick_adb() {
+  if [[ "$("$ADB" -s "$ADB_SERIAL" get-state 2>/dev/null)" == device ]]; then export ANDROID_SERIAL="$ADB_SERIAL"
+  else connect_adb >/dev/null; fi
+}
+
+recording() { [[ -f "$RECORDER_PID" ]] && kill -0 "$(cat "$RECORDER_PID")" 2>/dev/null; }
+
+# The robot's last $1 log lines: from the recorded log while the recorder runs (instant),
+# otherwise straight from the robot.
+recent_log() {
+  if recording && [[ -s "$ROBOT_LOG" ]]; then tail -n "$1" "$ROBOT_LOG"
+  else quick_adb; "$ADB" logcat -d -v threadtime -t "$1" | tr -d '\r'; fi
+}
+
+# A marker line in the recorded log, so `logs --since-mark` can start from it.
+mark_log() {
+  mkdir -p "$LOG_DIR"
+  printf '=== ftc-bridge: %s (%s) ===\n' "$1" "$(date '+%m-%d %H:%M:%S')" >> "$ROBOT_LOG"
 }
 
 gradle() {
@@ -130,7 +160,10 @@ case "${1:-}" in
     if [[ -t 0 ]]; then read -r -s -p "Wi-Fi password for $SSID: " PSK; echo; else IFS= read -r PSK; fi
     printf '%s\n%s\n' "$SSID" "$PSK" | pi add "$NAME"
     ;;
-  use) check_name "${2:-}"; pi use "$2" ;;
+  use)
+    check_name "${2:-}"; pi use "$2"
+    "$ADB" disconnect "$ADB_SERIAL" >/dev/null 2>&1 || true  # don't keep talking to the last robot
+    ;;
   forget) check_name "${2:-}"; pi forget "$2" ;;
   disconnect) pi disconnect ;;
   reboot) pi power reboot ;;
@@ -140,12 +173,15 @@ case "${1:-}" in
     if [[ -n "${2:-}" ]]; then check_name "$2"; pi use "$2"; fi
     [[ -x ./gradlew ]] || die "run this from your robot project folder (the one with gradlew)"
     connect_adb
+    robot="$(field robot <<<"$(pi status)")"
     if [[ -z "$FULL" ]] && has_sloth; then
+      mark_log "upload to $robot (Sloth)"
       # Sloth (Dairy Foundation) hot-reloads the teamcode package; it applies when the current OpMode ends.
       gradle :TeamCode:deploySloth
       echo "Uploaded with Sloth. Changes load when the current OpMode stops."
     else
       backup_robot || echo "(backup failed; installing anyway)"
+      mark_log "upload to $robot (full install)"
       # Sloth's hot-loaded code survives installs and would override the new app, so clear it first.
       if has_sloth; then gradle :TeamCode:removeSlothRemote :TeamCode:installDebug; else gradle :TeamCode:installDebug; fi
       "$ADB" shell am start -n "$RC_ACTIVITY" >/dev/null
@@ -209,7 +245,7 @@ case "${1:-}" in
       die "updating the Pi failed (is it plugged in?)"
     ;;
   speedtest)
-    connect_adb >/dev/null
+    quick_adb
     f="$(mktemp)"; head -c 8000000 /dev/urandom > "$f"  # random, so nothing can compress it
     out="$("$ADB" push "$f" /data/local/tmp/ftc-bridge-speedtest 2>&1 | tail -1)" || true
     rm -f "$f"; "$ADB" shell rm -f /data/local/tmp/ftc-bridge-speedtest >/dev/null 2>&1 || true
@@ -217,8 +253,7 @@ case "${1:-}" in
     echo "Upload speed: $speed"
     ;;
   crashes)
-    connect_adb >/dev/null
-    "$ADB" logcat -d -v time -t "${2:-3000}" | tr -d '\r' |
+    recent_log "${2:-3000}" |
       awk -v pat="$CRASH_PATTERN" '$0 ~ pat {n = 14; found = 1; print "----"} n > 0 {print; n--}
         END {if (!found) print "No crashes in the recent log."}'
     ;;
@@ -256,17 +291,61 @@ case "${1:-}" in
     echo "Restored $2."
     ;;
   logs)
-    shift; FILTER=()
-    [[ "${1:-}" == "--errors" ]] && { FILTER=('*:E'); shift; }
-    connect_adb >/dev/null
-    "$ADB" logcat -d -t "${1:-300}" ${FILTER[@]+"${FILTER[@]}"}  # -d: a snapshot, never a live stream (rule R704.D)
+    shift; ERRORS=""; SINCE=""; N=300
+    while [[ $# -gt 0 ]]; do
+      case "$1" in --errors) ERRORS=1 ;; --since-mark) SINCE=1 ;; *) N="$1" ;; esac; shift
+    done
+    if [[ -n "$SINCE" ]]; then
+      [[ -s "$ROBOT_LOG" ]] || die "no recorded log yet (the app records it; or run: ftc-bridge record &)"
+      out="$(awk '/^=== ftc-bridge: / {buf = ""} {buf = buf $0 "\n"} END {printf "%s", buf}' "$ROBOT_LOG")"
+    else
+      out="$(recent_log "$N")"
+    fi
+    # threadtime lines: "MM-DD hh:mm:ss.mmm  PID  TID L Tag: message"; keep E(rror) and F(atal), and markers.
+    [[ -n "$ERRORS" ]] && out="$(grep -E '^[0-9-]+ [0-9:.]+ +[0-9]+ +[0-9]+ [EF] |^=== ftc-bridge' <<<"$out" || true)"
+    printf '%s\n' "$out" | tail -n "$N"
+    ;;
+  search)
+    [[ -n "${2:-}" ]] || die "usage: ftc-bridge search PATTERN [LINES]"
+    matches="$(recent_log "${3:-20000}" | grep -i -E -C 2 -- "$2" || true)"
+    [[ -n "$matches" ]] && printf '%s\n' "$matches" | tail -n 200 || echo "No lines match \"$2\"."
+    ;;
+  mark)
+    [[ -n "${2:-}" ]] || die "usage: ftc-bridge mark TEXT"
+    mark_log "${*:2}"; echo "Marked: ${*:2}"
+    ;;
+  record)
+    mkdir -p "$LOG_DIR"
+    if recording; then echo "Already recording (pid $(cat "$RECORDER_PID"))."; exit 0; fi
+    echo $$ > "$RECORDER_PID"
+    LC=""  # the running `adb logcat`
+    stop_recording() { [[ -n "$LC" ]] && kill "$LC" 2>/dev/null; rm -f "$RECORDER_PID"; exit 0; }
+    trap stop_recording INT TERM
+    echo "Recording the robot's log to $ROBOT_LOG (Ctrl-C to stop)." >&2
+    while true; do
+      "$ADB" connect "$ADB_SERIAL" >/dev/null 2>&1 || true
+      if [[ "$("$ADB" -s "$ADB_SERIAL" get-state 2>/dev/null)" == device ]]; then
+        # Resume from the last recorded line's time, so a reconnect doesn't lose or repeat much.
+        since="$(tail -1 "$ROBOT_LOG" 2>/dev/null | cut -c1-18 || true)"
+        if [[ "$since" =~ ^[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}$ ]]; then FROM=(-T "$since"); else FROM=(-T 2000); fi
+        "$ADB" -s "$ADB_SERIAL" logcat -v threadtime "${FROM[@]}" >> "$ROBOT_LOG" 2>/dev/null &
+        LC=$!
+        while kill -0 "$LC" 2>/dev/null; do
+          sleep 5 & wait $!  # (waiting this way lets Ctrl-C / quit stop it right away)
+          if (( $(stat -f%z "$ROBOT_LOG" 2>/dev/null || echo 0) > 20000000 )); then
+            kill "$LC" 2>/dev/null || true; mv "$ROBOT_LOG" "$ROBOT_LOG.1"
+          fi
+        done
+      fi
+      sleep 3 & wait $!
+    done
     ;;
   panels)
     if [[ "${2:-}" == "--stop" ]]; then
       for p in $PANELS_PORTS; do "$ADB" forward --remove "tcp:$p" >/dev/null 2>&1 || true; done
       echo "Panels tunnels closed."; exit 0
     fi
-    connect_adb >/dev/null
+    quick_adb
     for p in $PANELS_PORTS; do
       "$ADB" forward "tcp:$p" "tcp:$p" >/dev/null || die "port $p is busy on this Mac (close whatever uses it)"
     done
@@ -275,10 +354,10 @@ case "${1:-}" in
     ;;
   adb)
     shift
-    connect_adb >/dev/null
+    quick_adb
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,33p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac

@@ -91,9 +91,32 @@ enum Prefs {
     static let notify = "notifyOnConnectionChange"
     static let autoADB = "connectAndroidStudioAutomatically"
     static let crashAlerts = "crashAlerts"
+    static let recordLog = "recordRobotLog"
 
     static func register() {
-        UserDefaults.standard.register(defaults: [autoADB: true, crashAlerts: true])
+        UserDefaults.standard.register(defaults: [autoADB: true, crashAlerts: true, recordLog: true])
+    }
+}
+
+/// Runs `ftc-bridge record` while the app is open, so the robot's log is always on this Mac and
+/// the log commands and AI tools read it instantly.
+@MainActor
+enum LogRecorder {
+    private static var process: Process?
+
+    static func set(running on: Bool) {
+        if on, process?.isRunning != true, let path = BridgeCLI.path {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/bash")
+            p.arguments = [path, "record"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            process = p
+        } else if !on {
+            process?.terminate()  // the recorder stops its adb logcat and removes its pid file
+            process = nil
+        }
     }
 }
 
@@ -558,6 +581,7 @@ struct Panel: View {
     @AppStorage(Prefs.notify) private var notify = false
     @AppStorage(Prefs.autoADB) private var autoADB = true
     @AppStorage(Prefs.crashAlerts) private var crashAlerts = true
+    @AppStorage(Prefs.recordLog) private var recordLog = true
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var confirmShutdown = false
 
@@ -824,7 +848,7 @@ struct Panel: View {
     // MARK: Settings page
 
     private var version: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.5"
     }
 
     @ViewBuilder private var settingsPage: some View {
@@ -846,6 +870,8 @@ struct Panel: View {
             SwitchRow(title: "Connect Android Studio", detail: "The robot shows up in Android Studio by itself", isOn: $autoADB)
             SwitchRow(title: "Notifications", detail: "When the robot connects or drops", isOn: Binding(get: { notify }, set: setNotify))
             SwitchRow(title: "Crash alerts", detail: "When robot code throws or freezes", isOn: Binding(get: { crashAlerts }, set: setCrashAlerts))
+            SwitchRow(title: "Record robot log", detail: "So AI tools can read it instantly",
+                      isOn: Binding(get: { recordLog }, set: { recordLog = $0; LogRecorder.set(running: $0) }))
         }
 
         Divider()
@@ -951,6 +977,10 @@ struct FTCBridgeApp: App {
 
     init() {
         Prefs.register()
+        LogRecorder.set(running: UserDefaults.standard.bool(forKey: Prefs.recordLog))
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { LogRecorder.set(running: false) }
+        }
         if UserDefaults.standard.bool(forKey: Prefs.crashAlerts) {
             Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
         }

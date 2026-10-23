@@ -36,6 +36,8 @@ Mac ──USB──► Raspberry Pi Zero 2 W ──Wi-Fi──► Control Hub
 
 The **Health** card shows the Wi-Fi signal and channel, whether the robot app and adb answer, whether it's the same hub this robot had before (so you don't upload to the wrong robot), and a **Test** button for the real upload speed.
 
+While it's open, the app records the robot's log to `~/Library/Logs/ftc-bridge/robot.log`, so the log commands and AI tools read it instantly, and uploads add a marker so "everything since the last upload" is one command.
+
 If robot code throws, freezes, or crashes the app, you get a notification with the error and the line in your code, and a **Copy error** button for pasting into an AI chat.
 
 **Open Panels** opens the robot's Panels dashboard (telemetry, graphs, OpMode control, Limelight) in your browser at `http://localhost:8001`, through the Pi. The robot code needs Panels.
@@ -58,8 +60,11 @@ ftc-bridge speedtest            real upload speed to the robot
 ftc-bridge upload [NAME]        send code to the robot (run in the robot project); uses Sloth if the project has it
 ftc-bridge upload --full [NAME] full install + app restart (after changing libraries); backs up the robot first
 ftc-bridge test                 run the TeamCode unit tests (no robot needed)
-ftc-bridge logs [--errors] [N]  the robot's recent log
+ftc-bridge logs [--errors] [--since-mark] [N]   the robot's recent log; --since-mark: since the last upload or mark
+ftc-bridge search PATTERN       search the robot's log
 ftc-bridge crashes [N]          crashes and exceptions in the robot's recent log
+ftc-bridge mark TEXT            put a marker in the log (e.g. "starting intake test")
+ftc-bridge record               record the robot's log on this Mac (the app does this for you)
 ftc-bridge backup               save the robot's configs and app to this Mac (newest 5 kept per robot)
 ftc-bridge backups              list backups
 ftc-bridge restore ROBOT/TIME   put a backup back on the robot
@@ -70,7 +75,7 @@ An agent passes the password on stdin, so it isn't in the command line:
 `printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC`
 
 ## AI apps (MCP)
-`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
+`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `search_logs`, `mark_log`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
 
 **Claude Code:**
 ```bash
