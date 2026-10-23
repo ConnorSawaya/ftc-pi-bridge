@@ -13,6 +13,7 @@
 #   ftc-bridge speedtest            real upload speed to the robot (sends 8 MB through adb, then deletes it)
 #   ftc-bridge key                  this computer's public key (to give to whoever set up the Pi)
 #   ftc-bridge add-key "KEY"        let another computer (e.g. a teammate's Windows PC) use the Pi
+#   ftc-bridge pi-log [N]           how the Pi's previous run ended (a freeze ends without a shutdown)
 #   ftc-bridge pi-version           the Pi's software version, and the one on this Mac
 #   ftc-bridge update-pi            update the Pi's software from this Mac (takes a few seconds)
 #
@@ -245,6 +246,14 @@ case "${1:-}" in
        { printf "%s\n" "$k" >> ~/.ssh/authorized_keys; echo "Added. That computer can use the Pi now."; }' ||
       die "can't reach the Pi. Is it plugged into this Mac?"
     ;;
+  pi-log)
+    ssh "${SSH_OPTS[@]}" "$PI" "sudo journalctl -b -1 --no-pager -n ${2:-40} -o short 2>/dev/null |
+      grep . || echo 'No earlier run saved yet.'
+      sudo journalctl -b -1 --no-pager -n 3 2>/dev/null | grep -q 'Journal stopped' &&
+        echo '(That run ended with a normal shutdown or restart.)' ||
+        echo '(That run ended suddenly: a freeze, a power cut, or the cable was pulled.)'" ||
+      die "can't reach the Pi. Is it plugged into this Mac?"
+    ;;
   pi-version)
     installed="$(installed_pi_version)"; latest="$(latest_pi_version)"
     echo "installed=$installed"; echo "latest=$latest"
@@ -375,6 +384,6 @@ case "${1:-}" in
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,42p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,43p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac

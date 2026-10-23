@@ -220,6 +220,13 @@ async def read_telemetry(seconds: float = 3.0) -> str:
 
 
 @mcp.tool()
+def pi_log(lines: int = 40) -> str:
+    """How the Pi's previous run ended. If the Pi froze (the watchdog restarts it), the log ends
+    suddenly; the last lines show what it was doing."""
+    return run("pi-log", str(lines))
+
+
+@mcp.tool()
 def update_pi() -> str:
     """Update the Pi's software from this Mac if it's out of date (about 10 s; adb reconnects after)."""
     version = run("pi-version")

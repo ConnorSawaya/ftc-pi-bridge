@@ -69,6 +69,7 @@ ftc-bridge forget NAME          delete a saved robot
 ftc-bridge disconnect           take the Pi off the robot's Wi-Fi
 ftc-bridge reboot | shutdown    restart or shut down the Pi
 ftc-bridge update-pi            update the Pi's software from this Mac
+ftc-bridge pi-log               how the Pi's last run ended (shows what it was doing if it froze)
 ftc-bridge key                  this computer's public key
 ftc-bridge add-key "KEY"        let another computer (e.g. a teammate's PC) use the Pi
 ftc-bridge health               signal, channel, robot app, adb, and whether it's the same hub as before
@@ -91,7 +92,7 @@ An agent passes the password on stdin, so it isn't in the command line:
 `printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC`
 
 ## AI apps (MCP)
-`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `search_logs`, `mark_log`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
+`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `search_logs`, `mark_log`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `pi_log`, `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
 
 **Claude Code:**
 ```bash
