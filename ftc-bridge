@@ -33,6 +33,9 @@
 #   ftc-bridge mark TEXT            write a marker line into the recorded log (e.g. "starting intake test")
 #   ftc-bridge record               keep recording the robot's log on this Mac (the app runs this), so the
 #                                   log commands above read it instantly
+#   ftc-bridge data                 runs recorded on the robot by BridgeLog (robot/BridgeLog.java)
+#   ftc-bridge data pull [latest|all|NAME]   copy runs to this Mac (only new ones); prints their paths
+#   ftc-bridge data summary [latest|FILE]    each column's min / max / mean, and how long the run was
 #   ftc-bridge backup               save the robot's configs and app to this Mac (newest 5 kept per robot)
 #   ftc-bridge backups              list backups
 #   ftc-bridge restore ROBOT/TIME [--force]   put a backup's app and configs back on the robot
@@ -58,6 +61,8 @@ PANELS_PORTS="8001 8002 5800 5801 5805 5807"
 APP="com.qualcomm.ftcrobotcontroller"
 BACKUPS="$HOME/Library/Application Support/ftc-pi-bridge/backups"
 KEEP_BACKUPS=5
+DATA="$HOME/Library/Application Support/ftc-pi-bridge/data"   # runs pulled from the robot
+ROBOT_DATA="/sdcard/FIRST/bridge-data"                        # where BridgeLog.java writes them
 # What the FTC SDK and Android log when robot code throws, freezes or crashes the app.
 CRASH_PATTERN='User code threw an uncaught exception|User OpMode was stuck in|FATAL EXCEPTION'
 LOG_DIR="$HOME/Library/Logs/ftc-bridge"
@@ -283,6 +288,47 @@ case "${1:-}" in
       awk -v pat="$CRASH_PATTERN" '$0 ~ pat {n = 14; found = 1; print "----"} n > 0 {print; n--}
         END {if (!found) print "No crashes in the recent log."}'
     ;;
+  data)
+    case "${2:-list}" in
+      list)
+        quick_adb
+        # toybox ls -l: perms links owner group size date time name
+        runs="$("$ADB" shell "ls -l $ROBOT_DATA 2>/dev/null" | tr -d '\r' | awk '$NF ~ /\.csv$/ {printf "%s  (%.0f KB)\n", $NF, $5/1024}' | sort -r)"
+        [[ -n "$runs" ]] && echo "$runs" || echo "No runs on the robot yet. Add robot/BridgeLog.java to TeamCode and run an OpMode."
+        ;;
+      pull)
+        quick_adb
+        robot="$(field robot <<<"$(pi status)")"; dest="$DATA/${robot:-unknown}"; mkdir -p "$dest"
+        listing="$("$ADB" shell "ls -l $ROBOT_DATA 2>/dev/null" | tr -d '\r' | awk '$NF ~ /\.csv$/ {print $5, $NF}' | sort -k2 -r)"
+        [[ -n "$listing" ]] || die "no runs on the robot yet (add robot/BridgeLog.java to TeamCode and run an OpMode)"
+        case "${3:-latest}" in
+          latest) wanted="$(head -1 <<<"$listing")" ;;
+          all) wanted="$listing" ;;
+          *) wanted="$(awk -v n="$3" '$2 == n || $2 == n".csv"' <<<"$listing")"; [[ -n "$wanted" ]] || die "no run called $3 (ftc-bridge data lists them)" ;;
+        esac
+        while read -r size name; do
+          # Already here with the same size: skip (a finished run never changes).
+          if [[ "$(stat -f%z "$dest/$name" 2>/dev/null)" != "$size" ]]; then
+            "$ADB" pull "$ROBOT_DATA/$name" "$dest/$name" >/dev/null || die "couldn't copy $name"
+          fi
+          echo "$dest/$name"
+        done <<<"$wanted"
+        ;;
+      summary)
+        f="${3:-latest}"
+        if [[ "$f" == latest ]]; then f="$(ls -t "$DATA"/*/*.csv 2>/dev/null | head -1)"; [[ -n "$f" ]] || die "nothing pulled yet: ftc-bridge data pull"; fi
+        [[ -f "$f" ]] || die "no file $f"
+        echo "$f"
+        awk -F, 'NR == 1 {for (i = 1; i <= NF; i++) name[i] = $i; cols = NF; next}
+          {rows++; for (i = 1; i <= cols; i++) if ($i != "" && $i + 0 == $i) {
+             v = $i + 0; if (!(i in n)) {mn[i] = v; mx[i] = v}; n[i]++; sum[i] += v
+             if (v < mn[i]) mn[i] = v; if (v > mx[i]) mx[i] = v } ; last_t = $1 }
+          END {printf "%d rows, %.1f s\n%-28s %12s %12s %12s\n", rows, last_t, "column", "min", "max", "mean"
+               for (i = 1; i <= cols; i++) if (i in n) printf "%-28s %12.3f %12.3f %12.3f\n", name[i], mn[i], mx[i], sum[i] / n[i]}' "$f"
+        ;;
+      *) die "usage: ftc-bridge data [list | pull [latest|all|NAME] | summary [latest|FILE]]" ;;
+    esac
+    ;;
   backup)
     connect_adb >/dev/null
     backup_robot
@@ -384,6 +430,6 @@ case "${1:-}" in
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,43p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,46p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac

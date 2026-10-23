@@ -58,6 +58,18 @@ If robot code throws, freezes, or crashes the app, you get a notification with t
 
 The ⚙ button has settings (open at login, robot name in the menu bar, connect Android Studio, notifications, crash alerts), **Back up robot**, and Pi controls: **Disconnect from robot**, **Restart Pi**, **Shut down Pi**.
 
+## Robot data (BridgeLog)
+Copy `robot/BridgeLog.java` into your `TeamCode` folder (in `org.firstinspires.ftc.teamcode`). From then on every OpMode run is recorded on the robot by itself, 25 times a second, as one CSV per run: time, init/run phase, each motor's power, position and velocity, battery voltage, and a goBILDA Pinpoint's position and heading if you have one. Add anything else with one line in your loop, e.g. `BridgeLog.put("aimError", error);`.
+
+```
+ftc-bridge data                     list runs on the robot
+ftc-bridge data pull                copy the newest run to this computer (about a second)
+ftc-bridge data summary             min / max / mean of every column, and how long it ran
+```
+AI tools: `robot_data_runs`, `robot_data_summary`, `robot_data_rows` (pick columns and a time window).
+
+It reads the hubs with its own bulk reads, so it doesn't change what your OpMode reads, but it does add some hub traffic: set `BridgeLog.hz` lower, or `BridgeLog.enabled = false`, if your loop timing matters more.
+
 ## Terminal command (for you or an AI agent)
 ```
 ftc-bridge status               which robot the Pi is on, and whether it answers
@@ -92,7 +104,7 @@ An agent passes the password on stdin, so it isn't in the command line:
 `printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC`
 
 ## AI apps (MCP)
-`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `search_logs`, `mark_log`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `pi_log`, `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
+`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `search_logs`, `mark_log`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `robot_data_runs`, `robot_data_summary`, `robot_data_rows`, `pi_log`, `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
 
 **Claude Code:**
 ```bash
@@ -136,6 +148,7 @@ Paste this into your robot repo's `CLAUDE.md` / `AGENTS.md`:
 | `mcp/server.py` | The MCP server for AI apps |
 | `mac/` | The FTC Bridge menu bar app |
 | `windows/` | `ftc-bridge` and the installer for Windows |
+| `robot/BridgeLog.java` | Drop-in recorder for your robot code |
 
 ## License
 MIT

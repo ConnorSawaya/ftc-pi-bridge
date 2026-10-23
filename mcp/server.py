@@ -8,6 +8,7 @@ Each tool runs the matching `ftc-bridge` command and returns what it printed.
 Run with:  uv run mcp/server.py   (uv installs the MCP library the first time)
 """
 import asyncio
+import csv
 import json
 import os
 import shutil
@@ -130,6 +131,74 @@ def mark_log(note: str) -> str:
     """Write a marker into the recorded log (e.g. "user is testing the intake now"), so
     logs(since_mark=True) returns only what happens after it. Uploads add one by themselves."""
     return run("mark", note)
+
+
+def pulled_file(name: str) -> tuple[str | None, str]:
+    """Copies a BridgeLog run to this computer (only if it's new) and returns its local path."""
+    if os.path.isfile(name):
+        return name, ""
+    out = _run_bridge(["data", "pull", name], 300)
+    if out.startswith("FAILED"):
+        return None, out
+    return out.strip().splitlines()[-1], ""
+
+
+def _run_bridge(args: list[str], timeout: int) -> str:
+    """run(), for the data tools: their `run` argument hides the run() function inside them."""
+    return run(*args, timeout=timeout)
+
+
+@mcp.tool()
+def robot_data_runs() -> str:
+    """Runs recorded on the robot by BridgeLog (one CSV per OpMode run, newest first). Each has
+    time, phase (init/run), every motor's power/position/velocity, battery voltage, Pinpoint
+    position/heading if present, and values the code adds with BridgeLog.put()."""
+    return run("data", timeout=60)
+
+
+@mcp.tool()
+def robot_data_summary(run: str = "latest") -> str:
+    """Copies a run from the robot (fast; only new ones) and summarizes it: rows, duration, and
+    each column's min / max / mean. `run` is "latest", a name from robot_data_runs, or a local path."""
+    path, problem = pulled_file(run)
+    if problem:
+        return problem
+    return _run_bridge(["data", "summary", path], 60)
+
+
+@mcp.tool()
+def robot_data_rows(run: str = "latest", columns: str = "", start_s: float = 0, end_s: float = 0,
+                    phase: str = "", max_rows: int = 400) -> str:
+    """Rows from a recorded run, as CSV. `columns`: comma-separated names (empty = all; "t" is
+    always included). `start_s`/`end_s`: time window in seconds (0 = no limit). `phase`: "init" or
+    "run" to keep only that part. Long runs are thinned evenly to `max_rows`, so ask for a time
+    window or fewer columns to see full detail."""
+    path, problem = pulled_file(run)
+    if problem:
+        return problem
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, [])
+        wanted = [c.strip() for c in columns.split(",") if c.strip()]
+        missing = [c for c in wanted if c not in header]
+        if missing:
+            return f"FAILED: no column {', '.join(missing)}. Columns: {', '.join(header)}"
+        keep = [0] + [header.index(c) for c in wanted if c != "t"] if wanted else list(range(len(header)))
+        p_col = header.index("phase") if "phase" in header else -1
+        rows = []
+        for r in reader:
+            try:
+                t = float(r[0])
+            except (ValueError, IndexError):
+                continue
+            if (start_s and t < start_s) or (end_s and t > end_s) or (phase and p_col >= 0 and r[p_col] != phase):
+                continue
+            rows.append(r)
+    step = max(1, -(-len(rows) // max(1, max_rows)))  # ceiling division
+    shown = rows[::step]
+    lines = [",".join(header[i] for i in keep)] + [",".join(r[i] if i < len(r) else "" for i in keep) for r in shown]
+    note = f"{len(rows)} rows matched; showing every {step}th ({len(shown)} rows)\n" if step > 1 else f"{len(rows)} rows\n"
+    return f"{os.path.basename(path)}: " + note + "\n".join(lines)
 
 
 @mcp.tool()

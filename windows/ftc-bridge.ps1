@@ -32,6 +32,9 @@ ftc-bridge search PATTERN [N]   search the robot's log
 ftc-bridge crashes [N]          crashes and exceptions in the recent log
 ftc-bridge mark TEXT            put a marker in the recorded log
 ftc-bridge record               keep recording the robot's log on this computer
+ftc-bridge data                 runs recorded on the robot by BridgeLog (robot\BridgeLog.java)
+ftc-bridge data pull [latest|all|NAME]   copy runs to this computer (only new ones)
+ftc-bridge data summary [latest|FILE]    each column's min / max / mean, and the run's length
 ftc-bridge backup | backups     save the robot's configs and app / list backups
 ftc-bridge restore ROBOT/TIME [--force]   put a backup back on the robot
 ftc-bridge panels [--stop]      open the robot's Panels dashboard (http://localhost:8001)
@@ -60,6 +63,8 @@ $LogDir = Join-Path $Data 'logs'
 $RobotLog = Join-Path $LogDir 'robot.log'
 $RecorderPid = Join-Path $LogDir 'recorder.pid'
 $Backups = Join-Path $Data 'backups'
+$RunData = Join-Path $Data 'data'                  # runs pulled from the robot
+$RobotData = '/sdcard/FIRST/bridge-data'           # where BridgeLog.java writes them
 
 $Adb = (Get-Command adb -ErrorAction SilentlyContinue).Source
 if (-not $Adb -and $OnWindows) { $Adb = Join-Path $env:LOCALAPPDATA 'Android\Sdk\platform-tools\adb.exe' }
@@ -375,6 +380,77 @@ switch ($cmd) {
                 Start-Sleep -Seconds 3
             }
         } finally { Remove-Item $RecorderPid -ErrorAction SilentlyContinue }
+    }
+    'data' {
+        $sub = if ($arg1) { $arg1 } else { 'list' }
+        # Runs on the robot as size + name, newest first (toybox ls -l: perms links owner group size date time name).
+        function RobotRuns {
+            QuickAdb
+            $out = @()
+            foreach ($l in (& $Adb shell "ls -l $RobotData 2>/dev/null" 2>$null)) {
+                $p = ("$l".Trim()) -split '\s+'
+                if ($p.Count -ge 8 -and $p[-1] -like '*.csv') { $out += New-Object PSObject -Property @{ Size = [long]$p[4]; Name = $p[-1] } }
+            }
+            return @($out | Sort-Object Name -Descending)
+        }
+        switch ($sub) {
+            'list' {
+                $runs = RobotRuns
+                if ($runs.Count -eq 0) { Write-Output 'No runs on the robot yet. Add robot\BridgeLog.java to TeamCode and run an OpMode.' }
+                else { $runs | ForEach-Object { '{0}  ({1:N0} KB)' -f $_.Name, ($_.Size / 1024) } }
+            }
+            'pull' {
+                $runs = RobotRuns
+                if ($runs.Count -eq 0) { Die 'no runs on the robot yet (add robot\BridgeLog.java to TeamCode and run an OpMode)' }
+                $robot = Field (PiRun @('status')) 'robot'; if (-not $robot) { $robot = 'unknown' }
+                $dest = Join-Path $RunData $robot; New-Item -ItemType Directory -Force -Path $dest | Out-Null
+                $which = if ($arg2) { $arg2 } else { 'latest' }
+                if ($which -eq 'latest') { $wanted = @($runs[0]) }
+                elseif ($which -eq 'all') { $wanted = $runs }
+                else { $wanted = @($runs | Where-Object { $_.Name -eq $which -or $_.Name -eq "$which.csv" }); if ($wanted.Count -eq 0) { Die "no run called $which (ftc-bridge data lists them)" } }
+                foreach ($r in $wanted) {
+                    $local = Join-Path $dest $r.Name
+                    # Already here with the same size: skip (a finished run never changes).
+                    if (-not ((Test-Path $local) -and (Get-Item $local).Length -eq $r.Size)) {
+                        & $Adb pull "$RobotData/$($r.Name)" $local *> $null
+                        if ($LASTEXITCODE -ne 0) { Die "couldn't copy $($r.Name)" }
+                    }
+                    Write-Output $local
+                }
+            }
+            'summary' {
+                $f = if ($arg2) { $arg2 } else { 'latest' }
+                if ($f -eq 'latest') {
+                    $f = (Get-ChildItem $RunData -Recurse -Filter *.csv -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+                    if (-not $f) { Die 'nothing pulled yet: ftc-bridge data pull' }
+                }
+                if (-not (Test-Path $f)) { Die "no file $f" }
+                Write-Output $f
+                $reader = New-Object IO.StreamReader($f)
+                $names = $reader.ReadLine().Split(',')
+                $min = @{}; $max = @{}; $sum = @{}; $n = @{}; $rows = 0; $lastT = 0.0
+                $inv = [Globalization.CultureInfo]::InvariantCulture
+                while ($null -ne ($line = $reader.ReadLine())) {
+                    $v = $line.Split(','); $rows++
+                    for ($i = 0; $i -lt $names.Count -and $i -lt $v.Count; $i++) {
+                        $x = 0.0
+                        if ([double]::TryParse($v[$i], [Globalization.NumberStyles]::Float, $inv, [ref]$x)) {
+                            if (-not $n.ContainsKey($i)) { $min[$i] = $x; $max[$i] = $x; $sum[$i] = 0.0; $n[$i] = 0 }
+                            if ($x -lt $min[$i]) { $min[$i] = $x }; if ($x -gt $max[$i]) { $max[$i] = $x }
+                            $sum[$i] += $x; $n[$i]++
+                            if ($i -eq 0) { $lastT = $x }
+                        }
+                    }
+                }
+                $reader.Close()
+                Write-Output ("{0} rows, {1:F1} s" -f $rows, $lastT)
+                Write-Output ('{0,-28} {1,12} {2,12} {3,12}' -f 'column', 'min', 'max', 'mean')
+                for ($i = 0; $i -lt $names.Count; $i++) {
+                    if ($n.ContainsKey($i)) { Write-Output ([string]::Format($inv, '{0,-28} {1,12:F3} {2,12:F3} {3,12:F3}', $names[$i], $min[$i], $max[$i], $sum[$i] / $n[$i])) }
+                }
+            }
+            default { Die 'usage: ftc-bridge data [list | pull [latest|all|NAME] | summary [latest|FILE]]' }
+        }
     }
     'backup' { ConnectAdb; BackupRobot }
     'backups' {
