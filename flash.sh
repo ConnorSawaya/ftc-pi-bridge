@@ -7,6 +7,7 @@
 #
 # The card boots into: USB networking to the Mac (Pi = 10.12.194.1), an ADB forwarder, and
 # `ftc-hub`, which the FTC Bridge menu bar app uses to pick the Control Hub's Wi-Fi.
+# Later changes to pi/ reach the Pi with `ftc-bridge update-pi`; no reflashing needed.
 # Wi-Fi country defaults to US; override with COUNTRY=GB ./flash.sh
 set -euo pipefail
 
@@ -43,6 +44,17 @@ else
   OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 fi
 
+# Every file in pi/ goes to /opt/ftc-pi-bridge/ on the card; install.sh puts them in place at
+# first boot, the same way `ftc-bridge update-pi` does later.
+PI_VERSION="$(cd "$HERE/pi" && cat $(ls | sort) | shasum -a 256 | cut -c1-12)"
+PI_FILES_YAML=""
+for f in "$HERE"/pi/*; do
+  PI_FILES_YAML+="  - path: /opt/ftc-pi-bridge/$(basename "$f")
+    content: |
+$(indent "$f")
+"
+done
+
 cat > "$OUT/user-data" <<EOF
 #cloud-config
 hostname: ftcpi
@@ -59,32 +71,9 @@ enable_ssh: true
 rpi:
   enable_usb_gadget: true
 write_files:
-  - path: /usr/local/bin/adb-forward.py
-    permissions: "0755"
-    content: |
-$(indent "$HERE/pi/adb-forward.py")
-  - path: /etc/systemd/system/adb-forward.service
-    content: |
-$(indent "$HERE/pi/adb-forward.service")
-  - path: /etc/NetworkManager/dnsmasq-shared.d/95-ftc-no-gateway.conf
-    content: |
-$(indent "$HERE/pi/no-gateway.conf")
-  - path: /usr/local/bin/ftc-hub
-    permissions: "0755"
-    content: |
-$(indent "$HERE/pi/ftc-hub")
-  - path: /etc/systemd/system.conf.d/watchdog.conf
-    content: |
-      [Manager]
-      # Restart the Pi by itself if it ever freezes.
-      RuntimeWatchdogSec=15
-runcmd:
+${PI_FILES_YAML}runcmd:
   - [systemctl, enable, --now, ssh]
-  - [systemctl, daemon-reload]
-  - [systemctl, enable, --now, adb-forward.service]
-  - [rfkill, unblock, wifi]
-  - [nmcli, radio, wifi, "on"]
-  - [mkdir, -p, /var/log/journal]  # keep logs across restarts, to see why a freeze happened
+  - [bash, /opt/ftc-pi-bridge/install.sh, "$PI_VERSION", first-boot]
 EOF
 
 if [[ -n "$DRY_RUN" ]]; then echo "Wrote $OUT/user-data"; exit 0; fi

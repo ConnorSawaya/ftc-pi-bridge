@@ -52,6 +52,7 @@ ftc-bridge use NAME             switch to that robot
 ftc-bridge forget NAME          delete a saved robot
 ftc-bridge disconnect           take the Pi off the robot's Wi-Fi
 ftc-bridge reboot | shutdown    restart or shut down the Pi
+ftc-bridge update-pi            update the Pi's software from this Mac
 ftc-bridge health               signal, channel, robot app, adb, and whether it's the same hub as before
 ftc-bridge speedtest            real upload speed to the robot
 ftc-bridge upload [NAME]        send code to the robot (run in the robot project); uses Sloth if the project has it
@@ -69,7 +70,7 @@ An agent passes the password on stdin, so it isn't in the command line:
 `printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC`
 
 ## AI apps (MCP)
-`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
+`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
 
 **Claude Code:**
 ```bash
@@ -90,6 +91,9 @@ args = ["run", "/path/to/ftc-pi-bridge/mcp/server.py"]
 
 Paste this into your robot repo's `CLAUDE.md` / `AGENTS.md`:
 > To upload robot code: run `ftc-bridge robots` and make sure you know which robot the user means (ask if unclear). Then run `ftc-bridge upload <name>` from the project root. If it fails, run `ftc-bridge status` and report what it says.
+
+## Updating
+`git pull`, then `./install.sh` (rebuilds the app). If the Pi's software changed, the app shows **Update the Pi**; one click updates it over USB, no reflashing.
 
 ## Things to know
 - **On a Pi Zero 2 W, the robot must be on 2.4 GHz.** It can't see 5 GHz. Control Hubs ship on 2.4 GHz, but events may ask you to use 5 GHz; there, use the normal USB cable.

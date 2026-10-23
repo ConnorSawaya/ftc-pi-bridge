@@ -177,6 +177,8 @@ final class Bridge: ObservableObject {
     @Published var health: Health?
     @Published var speed = ""          // last speed test, e.g. "3.2 MB/s"
     @Published var lastCrash: Crash?
+    @Published var piOutdated = false  // the Pi's software is older than the copy in this app
+    private var checkPiVersionSoon = true
     private var checkedOnce = false    // no notification for the state the app starts in
     private var adbRobot = ""          // robot adb is connected to, so a switch reconnects it
     private var seenCrashes: Set<String> = []
@@ -187,6 +189,7 @@ final class Bridge: ObservableObject {
             var tick = 0
             while true {
                 await refresh()
+                if checkPiVersionSoon || tick % 12 == 0 { await checkPiVersion() }  // every minute
                 if tick % 2 == 0 { await checkCrashes() }    // every 10 s
                 if tick % 3 == 0 { await refreshHealth() }   // every 15 s
                 tick += 1
@@ -250,6 +253,7 @@ final class Bridge: ObservableObject {
         } else {
             link = .noPi
         }
+        if before == .noPi && link != .noPi { checkPiVersionSoon = true }  // just plugged in
         // Keep adb connected to the robot so it shows up in Android Studio by itself.
         if link == .connected && UserDefaults.standard.bool(forKey: Prefs.autoADB) && ADB.path != nil {
             let stillConnected = adbRobot == robot ? await ADB.isConnected() : false
@@ -339,6 +343,29 @@ final class Bridge: ObservableObject {
             content.sound = .default
             try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: crash.id, content: content, trigger: nil))
         }
+    }
+
+    func checkPiVersion() async {
+        guard link != .noPi else { return }
+        checkPiVersionSoon = false
+        let result = await BridgeCLI.run(["pi-version"])
+        var f: [String: String] = [:]
+        for line in result.output.split(separator: "\n") {
+            if let eq = line.firstIndex(of: "=") { f[String(line[..<eq])] = String(line[line.index(after: eq)...]) }
+        }
+        if let installed = f["installed"], let latest = f["latest"] { piOutdated = installed != latest }
+    }
+
+    func updatePi() async {
+        busy = true
+        messageIsError = false
+        message = "Updating the Pi…"
+        let result = await BridgeCLI.run(["update-pi"])
+        busy = false
+        await checkPiVersion()
+        if result.ok && !piOutdated { message = "The Pi is up to date." }
+        else { showError(result.output.split(separator: "\n").last.map(String.init) ?? "Updating the Pi failed") }
+        await refreshHealth()
     }
 
     func speedTest() async {
@@ -576,6 +603,10 @@ struct Panel: View {
 
     @ViewBuilder private var mainPage: some View {
         header
+        if bridge.piOutdated && bridge.link != .noPi {
+            ActionRow(icon: "arrow.down.circle.fill", title: "Update the Pi", detail: "New Pi software from this Mac (about 10 s)",
+                      tint: .accentColor, enabled: !bridge.busy) { Task { await bridge.updatePi() } }
+        }
         if bridge.link == .connected {
             ActionRow(icon: "chart.xyaxis.line", title: "Open Panels", detail: "Telemetry, graphs, OpMode control",
                       enabled: !bridge.busy) { Task { await bridge.openPanels() } }
@@ -793,7 +824,7 @@ struct Panel: View {
     // MARK: Settings page
 
     private var version: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4"
     }
 
     @ViewBuilder private var settingsPage: some View {

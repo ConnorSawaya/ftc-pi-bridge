@@ -9,7 +9,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14" FTCBridge.swift -o "$APP/Contents/MacOS/FTCBridge"
 cp Info.plist "$APP/Contents/"
 cp AppIcon.icns "$APP/Contents/Resources/"   # made by make-icon.swift
-cp ../ftc-bridge "$APP/Contents/Resources/"  # the app runs it for backups and speed tests
+cp ../ftc-bridge "$APP/Contents/Resources/"  # the app runs it for backups, speed tests and Pi updates
+cp -R ../pi "$APP/Contents/Resources/"       # the Pi's files, for "Update the Pi"
 codesign --force --sign - "$APP"  # ad-hoc signature, enough to run on this Mac
 
 rm -rf "/Applications/FTC Bridge.app"

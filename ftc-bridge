@@ -11,6 +11,8 @@
 #   ftc-bridge reboot | shutdown    restart or shut down the Pi (shut down before unplugging)
 #   ftc-bridge health               Wi-Fi signal and channel, robot app, adb, and whether it's the same hub as before
 #   ftc-bridge speedtest            real upload speed to the robot (sends 8 MB through adb, then deletes it)
+#   ftc-bridge pi-version           the Pi's software version, and the one on this Mac
+#   ftc-bridge update-pi            update the Pi's software from this Mac (takes a few seconds)
 #
 #   Run these from the robot project folder:
 #   ftc-bridge upload [NAME]        send code to the robot. Uses Sloth hot reload (~1 s) if the
@@ -31,7 +33,12 @@
 # Example for an agent:  printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC
 set -euo pipefail
 
+# Where this script really lives (it may be run through a symlink), and the Pi's files next to it.
+SELF="$0"; while [[ -L "$SELF" ]]; do SELF="$(readlink "$SELF")"; done
+PI_FILES="$(cd "$(dirname "$SELF")" && pwd)/pi"
 PI="ftc@10.12.194.1"
+SSH_OPTS=(-i "$HOME/.ssh/ftcpi" -o BatchMode=yes -o ConnectTimeout=3 -o LogLevel=ERROR
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 ADB_SERIAL="10.12.194.1:5555"
 RC_ACTIVITY="com.qualcomm.ftcrobotcontroller/org.firstinspires.ftc.robotcontroller.internal.PermissionValidatorWrapper"
 ADB="$(command -v adb || echo "$HOME/Library/Android/sdk/platform-tools/adb")"
@@ -52,14 +59,19 @@ check_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "robot names can use 
 # USB cable, so its key isn't pinned.
 pi() {
   local rc=0
-  ssh -i "$HOME/.ssh/ftcpi" -o BatchMode=yes -o ConnectTimeout=3 -o LogLevel=ERROR \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "$PI" sudo /usr/local/bin/ftc-hub "$@" || rc=$?
+  ssh "${SSH_OPTS[@]}" "$PI" sudo /usr/local/bin/ftc-hub "$@" || rc=$?
   [[ $rc -eq 255 ]] && die "can't reach the Pi. Is it plugged into this Mac?"
   return $rc
 }
 
 field() { sed -n "s/^$1=//p"; }
+
+# The Pi software's version: a fingerprint of the files in pi/, so any change makes a new one.
+latest_pi_version() { (cd "$PI_FILES" && cat $(ls | sort) | shasum -a 256 | cut -c1-12); }
+installed_pi_version() {
+  ssh "${SSH_OPTS[@]}" "$PI" 'cat /etc/ftc-pi-bridge/version 2>/dev/null || echo none' ||
+    die "can't reach the Pi. Is it plugged into this Mac?"
+}
 
 status() {
   local s robot ssid hub
@@ -180,6 +192,22 @@ case "${1:-}" in
     fi
     [[ $ok == 1 ]] || exit 1
     ;;
+  pi-version)
+    installed="$(installed_pi_version)"; latest="$(latest_pi_version)"
+    echo "installed=$installed"; echo "latest=$latest"
+    [[ "$installed" == "$latest" ]] && echo "The Pi is up to date." || echo "Update with: ftc-bridge update-pi"
+    ;;
+  update-pi)
+    [[ -f "$PI_FILES/install.sh" ]] || die "can't find the Pi's files ($PI_FILES)"
+    latest="$(latest_pi_version)"
+    # Copy pi/ over the USB link (without macOS's ._ metadata files) and run its install script
+    # as root. Also set the Pi's clock: it has no internet to set it, so it drifts.
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -czf - -C "$PI_FILES" . | ssh "${SSH_OPTS[@]}" "$PI" \
+      "sudo date -u -s @$(date +%s) >/dev/null; rm -rf /tmp/ftc-pi-update && mkdir /tmp/ftc-pi-update &&
+       tar -xzf - -m --warning=no-unknown-keyword -C /tmp/ftc-pi-update &&
+       sudo bash /tmp/ftc-pi-update/install.sh $latest; rc=\$?; rm -rf /tmp/ftc-pi-update; exit \$rc" ||
+      die "updating the Pi failed (is it plugged in?)"
+    ;;
   speedtest)
     connect_adb >/dev/null
     f="$(mktemp)"; head -c 8000000 /dev/urandom > "$f"  # random, so nothing can compress it
@@ -251,6 +279,6 @@ case "${1:-}" in
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,33p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac

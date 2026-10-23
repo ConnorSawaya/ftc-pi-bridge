@@ -193,6 +193,15 @@ async def read_telemetry(seconds: float = 3.0) -> str:
 
 
 @mcp.tool()
+def update_pi() -> str:
+    """Update the Pi's software from this Mac if it's out of date (about 10 s; adb reconnects after)."""
+    version = run("pi-version")
+    if "up to date" in version or version.startswith("FAILED"):
+        return version
+    return run("update-pi", timeout=180)
+
+
+@mcp.tool()
 def disconnect() -> str:
     """Take the Pi off the robot's Wi-Fi. Required before a match (rule R704.C)."""
     return run("disconnect")

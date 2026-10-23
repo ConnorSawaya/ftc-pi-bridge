@@ -73,6 +73,14 @@ PY
   fi
 fi
 
+echo "Pi"
+if [[ -f "$HOME/.ssh/ftcpi" ]] && ping -c1 -t2 10.12.194.1 >/dev/null 2>&1; then
+  if "$HERE/ftc-bridge" pi-version 2>/dev/null | grep -q "up to date"; then skip "Pi: up to date"
+  elif ask "Update the Pi's software?"; then "$HERE/ftc-bridge" update-pi >/dev/null && ok "Pi updated"; fi
+else
+  skip "Pi not plugged in (the app offers the update when it is)"
+fi
+
 echo
 [[ -f "$HOME/.ssh/ftcpi" ]] || echo "Next: put an SD card in this Mac and run ./flash.sh to make the Pi's card."
 open "/Applications/FTC Bridge.app"
