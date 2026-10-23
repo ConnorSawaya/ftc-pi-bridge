@@ -7,6 +7,8 @@
 #   ftc-hub add NAME      ->  saves a robot; reads its Wi-Fi name, then password, from stdin (one per line)
 #   ftc-hub use NAME      ->  switches the Pi to that robot's Wi-Fi
 #   ftc-hub forget NAME   ->  deletes a saved robot
+#   ftc-hub disconnect    ->  leaves the robot's Wi-Fi and stays off it (before a match: rule R704.C)
+#   ftc-hub power reboot|off  ->  restarts or shuts down the Pi (shut down before unplugging)
 set -euo pipefail
 HUB_IP=192.168.43.1
 PREFIX=robot-  # each robot is a NetworkManager connection called robot-<name>
@@ -71,7 +73,20 @@ case "${1:-}" in
     nmcli con delete "$PREFIX$NAME" >/dev/null
     echo "Forgot $NAME"
     ;;
+  disconnect)
+    for r in $(saved); do nmcli con modify "$PREFIX$r" connection.autoconnect no; done
+    for r in $(nmcli -t -g NAME con show --active | sed -n "s/^$PREFIX//p"); do nmcli con down "$PREFIX$r" >/dev/null; done
+    echo "Off the robot's Wi-Fi"
+    ;;
+  power)
+    # Delayed by 2 s so this SSH call can return before the Pi goes down.
+    case "${2:-}" in
+      reboot) systemd-run --quiet --on-active=2 /usr/bin/systemctl reboot; echo "Restarting the Pi" ;;
+      off) systemd-run --quiet --on-active=2 /usr/bin/systemctl poweroff; echo "Shutting down the Pi. Unplug it when the green light stays off." ;;
+      *) echo "usage: ftc-hub power reboot|off" >&2; exit 2 ;;
+    esac
+    ;;
   *)
-    echo "usage: ftc-hub status|scan|list|add NAME|use NAME|forget NAME" >&2; exit 2
+    echo "usage: ftc-hub status|scan|list|add NAME|use NAME|forget NAME|disconnect|power reboot|off" >&2; exit 2
     ;;
 esac

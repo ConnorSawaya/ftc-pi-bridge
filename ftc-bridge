@@ -7,6 +7,8 @@
 #   ftc-bridge add NAME WIFI_NAME   save a robot; the password is read from stdin (asked if typing)
 #   ftc-bridge use NAME             switch the Pi to that robot
 #   ftc-bridge forget NAME          delete a saved robot
+#   ftc-bridge disconnect           take the Pi off the robot's Wi-Fi (before a match: rule R704.C)
+#   ftc-bridge reboot | shutdown    restart or shut down the Pi (shut down before unplugging)
 #
 #   Run these from the robot project folder:
 #   ftc-bridge upload [NAME]        send code to the robot. Uses Sloth hot reload (~1 s) if the
@@ -82,6 +84,9 @@ case "${1:-}" in
     ;;
   use) check_name "${2:-}"; pi use "$2" ;;
   forget) check_name "${2:-}"; pi forget "$2" ;;
+  disconnect) pi disconnect ;;
+  reboot) pi power reboot ;;
+  shutdown) pi power off ;;
   upload)
     FULL=""; [[ "${2:-}" == "--full" ]] && { FULL=1; shift; }
     if [[ -n "${2:-}" ]]; then check_name "$2"; pi use "$2"; fi
@@ -111,6 +116,6 @@ case "${1:-}" in
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac

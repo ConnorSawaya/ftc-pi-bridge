@@ -1,7 +1,9 @@
 // FTC Bridge: menu bar app for choosing which robot (Control Hub) the Pi joins.
 // Every action is one SSH call over the USB link to /usr/local/bin/ftc-hub on the Pi, which
 // stores the saved robots. The `ftc-bridge` terminal command uses the same calls.
+import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 enum Pi {
     static let login = "ftc@10.12.194.1"
@@ -48,6 +50,12 @@ func robotName(from ssid: String) -> String {
     return String(String(ssid.map { allowed.contains($0) ? $0 : "-" }).prefix(32))
 }
 
+/// Settings, saved in the app's preferences.
+enum Prefs {
+    static let showName = "showRobotNameInMenuBar"
+    static let notify = "notifyOnConnectionChange"
+}
+
 @MainActor
 final class Bridge: ObservableObject {
     enum Link { case noPi, noHub, connected }
@@ -60,6 +68,7 @@ final class Bridge: ObservableObject {
     @Published var message = ""        // shown only while working or after a problem
     @Published var messageIsError = false
     @Published var busy = false
+    private var checkedOnce = false    // no notification for the state the app starts in
 
     init() {
         Task { while true { await refresh(); try? await Task.sleep(for: .seconds(5)) } }
@@ -98,24 +107,41 @@ final class Bridge: ObservableObject {
     }
 
     func refresh() async {
+        let before = link
         let result = await Pi.run(["status"])
-        guard result.ok else { link = .noPi; return }
-        var saved: [Robot] = []
-        var fields: [String: String] = [:]
-        for line in result.output.split(separator: "\n") {
-            guard let eq = line.firstIndex(of: "=") else { continue }
-            let key = String(line[..<eq]), value = String(line[line.index(after: eq)...])
-            if key == "saved" {
-                let parts = value.split(separator: "\t", maxSplits: 1).map(String.init)
-                saved.append(Robot(name: parts[0], ssid: parts.count > 1 ? parts[1] : ""))
-            } else {
-                fields[key] = value
+        if result.ok {
+            var saved: [Robot] = []
+            var fields: [String: String] = [:]
+            for line in result.output.split(separator: "\n") {
+                guard let eq = line.firstIndex(of: "=") else { continue }
+                let key = String(line[..<eq]), value = String(line[line.index(after: eq)...])
+                if key == "saved" {
+                    let parts = value.split(separator: "\t", maxSplits: 1).map(String.init)
+                    saved.append(Robot(name: parts[0], ssid: parts.count > 1 ? parts[1] : ""))
+                } else {
+                    fields[key] = value
+                }
             }
+            robots = saved
+            robot = fields["robot"] ?? ""
+            ssid = fields["ssid"] ?? ""
+            link = fields["hub"] == "up" ? .connected : .noHub
+        } else {
+            link = .noPi
         }
-        robots = saved
-        robot = fields["robot"] ?? ""
-        ssid = fields["ssid"] ?? ""
-        link = fields["hub"] == "up" ? .connected : .noHub
+        if checkedOnce && before != link {
+            if link == .connected { notify("Connected to \(robot)", "Ready to upload.") }
+            else if before == .connected { notify("Lost the robot", subtitle) }
+        }
+        checkedOnce = true
+    }
+
+    private func notify(_ title: String, _ body: String) {
+        guard UserDefaults.standard.bool(forKey: Prefs.notify) else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     func scan() async {
@@ -137,6 +163,18 @@ final class Bridge: ObservableObject {
         _ = await perform("Forgetting \(name)…") { await Pi.run(["forget", name]) }
     }
 
+    func disconnect() async {
+        _ = await perform("Leaving the robot's Wi-Fi…") { await Pi.run(["disconnect"]) }
+    }
+
+    func power(_ action: String) async {
+        let done = await perform(action == "off" ? "Shutting down…" : "Restarting…") { await Pi.run(["power", action]) }
+        if done {
+            messageIsError = false
+            message = action == "off" ? "Unplug the Pi when its green light stays off." : "The Pi is restarting (about a minute)."
+        }
+    }
+
     /// Saves a robot and switches to it. Returns true if both worked.
     func add(name: String, ssid: String, password: String) async -> Bool {
         await perform("Saving \(name)…") {
@@ -145,6 +183,11 @@ final class Bridge: ObservableObject {
             self.message = "Connecting to \(name)…"
             return await Pi.run(["use", name])
         }
+    }
+
+    func showError(_ text: String) {
+        messageIsError = true
+        message = text
     }
 
     /// Shows `start` while `work` runs; afterwards shows nothing on success, or what went wrong.
@@ -187,17 +230,82 @@ struct SectionTitle: View {
     }
 }
 
+/// A setting with a small switch on the right.
+struct SwitchRow: View {
+    let title: String
+    var detail: String? = nil
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+            }
+            Spacer()
+            Toggle("", isOn: $isOn).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+    }
+}
+
+/// A clickable action row: icon, title, a line of detail.
+struct ActionRow: View {
+    let icon: String
+    let title: String
+    let detail: String
+    var tint: Color = .primary
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        HoverRow(enabled: enabled, action: action) { _ in
+            HStack(spacing: 10) {
+                Image(systemName: icon).frame(width: 18).foregroundStyle(enabled ? tint : Color.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).foregroundStyle(enabled ? tint : Color.secondary)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
 struct Panel: View {
+    enum Page { case main, settings }
+
     @ObservedObject var bridge: Bridge
+    @State private var page: Page
     @State private var adding: Bool
     @State private var name = ""
     @State private var ssid = ""
     @State private var password = ""
 
-    init(bridge: Bridge, adding: Bool = false) {
+    @AppStorage(Prefs.showName) private var showName = false
+    @AppStorage(Prefs.notify) private var notify = false
+    @State private var openAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var confirmShutdown = false
+
+    init(bridge: Bridge, page: Page = .main, adding: Bool = false) {
         self.bridge = bridge
+        _page = State(initialValue: page)
         _adding = State(initialValue: adding)
     }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch page {
+            case .main: mainPage
+            case .settings: settingsPage
+            }
+            if !bridge.message.isEmpty { messageLine }
+        }
+        .padding(12)
+        .frame(width: 300)
+    }
+
+    // MARK: Main page
 
     /// Scan results, minus robots already saved.
     private var newNetworks: [String] {
@@ -212,21 +320,14 @@ struct Panel: View {
             && !ssid.contains("\n") && !password.contains("\n")
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            if bridge.link != .noPi {
-                Divider()
-                robotList
-                Divider()
-                if adding { addForm } else { addButton }
-            }
-            if !bridge.message.isEmpty { messageLine }
+    @ViewBuilder private var mainPage: some View {
+        header
+        if bridge.link != .noPi {
             Divider()
-            footer
+            robotList
+            Divider()
+            if adding { addForm } else { addButton }
         }
-        .padding(12)
-        .frame(width: 300)
     }
 
     private var header: some View {
@@ -242,6 +343,10 @@ struct Panel: View {
             }
             Spacer()
             if bridge.busy { ProgressView().controlSize(.small) }
+            Button { page = .settings } label: { Image(systemName: "gearshape") }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Settings")
         }
         .padding(.horizontal, 4)
     }
@@ -337,17 +442,60 @@ struct Panel: View {
         .padding(.horizontal, 4)
     }
 
-    private var messageLine: some View {
-        Label(bridge.message, systemImage: bridge.messageIsError ? "exclamationmark.triangle.fill" : "info.circle")
-            .font(.caption)
-            .foregroundStyle(bridge.messageIsError ? Color.orange : Color.secondary)
-            .padding(.horizontal, 8)
-            .fixedSize(horizontal: false, vertical: true)
+    private func closeForm() {
+        adding = false
+        name = ""; ssid = ""; password = ""
     }
 
-    private var footer: some View {
+    // MARK: Settings page
+
+    private var version: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1"
+    }
+
+    @ViewBuilder private var settingsPage: some View {
+        HStack(spacing: 6) {
+            Button { page = .main; confirmShutdown = false } label: { Image(systemName: "chevron.left") }
+                .buttonStyle(.borderless)
+                .help("Back")
+            Text("Settings").font(.headline)
+            Spacer()
+            if bridge.busy { ProgressView().controlSize(.small) }
+        }
+        .padding(.horizontal, 4)
+
+        Divider()
+        VStack(alignment: .leading, spacing: 4) {
+            SectionTitle(text: "GENERAL")
+            SwitchRow(title: "Open at login", isOn: Binding(get: { openAtLogin }, set: setOpenAtLogin))
+            SwitchRow(title: "Robot name in menu bar", isOn: $showName)
+            SwitchRow(title: "Notifications", detail: "When the robot connects or drops", isOn: Binding(get: { notify }, set: setNotify))
+        }
+
+        Divider()
+        VStack(alignment: .leading, spacing: 2) {
+            SectionTitle(text: "PI")
+            ActionRow(icon: "wifi.slash", title: "Disconnect from robot", detail: "Before a match (rule R704.C)",
+                      enabled: !bridge.busy && !bridge.robot.isEmpty) { Task { await bridge.disconnect() } }
+            ActionRow(icon: "arrow.clockwise", title: "Restart Pi", detail: "If it stops answering",
+                      enabled: !bridge.busy && bridge.link != .noPi) { Task { await bridge.power("reboot") } }
+            ActionRow(icon: "power", title: confirmShutdown ? "Click again to shut down" : "Shut down Pi",
+                      detail: "Do this before unplugging it", tint: confirmShutdown ? .red : .primary,
+                      enabled: !bridge.busy && bridge.link != .noPi) {
+                if confirmShutdown {
+                    confirmShutdown = false
+                    Task { await bridge.power("off") }
+                } else {
+                    confirmShutdown = true
+                }
+            }
+        }
+
+        Divider()
         HStack {
-            Text("FTC Bridge").font(.caption).foregroundStyle(.secondary)
+            Text("FTC Bridge \(version)").font(.caption).foregroundStyle(.secondary)
+            Link("GitHub", destination: URL(string: "https://github.com/ConnorSawaya/ftc-pi-bridge")!)
+                .font(.caption)
             Spacer()
             Button("Quit") { NSApp.terminate(nil) }
                 .buttonStyle(.borderless)
@@ -356,9 +504,52 @@ struct Panel: View {
         .padding(.horizontal, 8)
     }
 
-    private func closeForm() {
-        adding = false
-        name = ""; ssid = ""; password = ""
+    private func setOpenAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            bridge.showError("Couldn't change Open at login: \(error.localizedDescription)")
+        }
+        openAtLogin = SMAppService.mainApp.status == .enabled
+        if SMAppService.mainApp.status == .requiresApproval {
+            bridge.showError("Allow FTC Bridge in System Settings › General › Login Items.")
+        }
+    }
+
+    private func setNotify(_ on: Bool) {
+        notify = on
+        guard on else { return }
+        Task {
+            let allowed = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
+            if !allowed {
+                notify = false
+                bridge.showError("Notifications are off for FTC Bridge in System Settings › Notifications.")
+            }
+        }
+    }
+
+    // MARK: Shared
+
+    private var messageLine: some View {
+        Label(bridge.message, systemImage: bridge.messageIsError ? "exclamationmark.triangle.fill" : "info.circle")
+            .font(.caption)
+            .foregroundStyle(bridge.messageIsError ? Color.orange : Color.secondary)
+            .padding(.horizontal, 8)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The menu bar item: the status icon, plus the robot's name if that setting is on.
+struct MenuBarLabel: View {
+    @ObservedObject var bridge: Bridge
+    @AppStorage(Prefs.showName) private var showName = false
+
+    var body: some View {
+        if showName && bridge.link != .noPi && !bridge.robot.isEmpty {
+            Label(bridge.robot, systemImage: bridge.icon).labelStyle(.titleAndIcon)
+        } else {
+            Image(systemName: bridge.icon)
+        }
     }
 }
 
@@ -370,7 +561,7 @@ struct FTCBridgeApp: App {
         MenuBarExtra {
             Panel(bridge: bridge)
         } label: {
-            Image(systemName: bridge.icon)
+            MenuBarLabel(bridge: bridge)
         }
         .menuBarExtraStyle(.window)
     }
