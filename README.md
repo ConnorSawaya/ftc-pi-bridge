@@ -98,13 +98,14 @@ ftc-bridge backup               save the robot's configs and app to this Mac (ne
 ftc-bridge backups              list backups
 ftc-bridge restore ROBOT/TIME   put a backup back on the robot
 ftc-bridge panels [--stop]      open the robot's Panels dashboard at http://localhost:8001
+ftc-bridge tuning [--stop]      open Pedro Pathing's AutoTune page at http://localhost:10158 (Foresight and the other tuners)
 ftc-bridge adb ARGS...          any adb command, sent to the robot through the Pi
 ```
 An agent passes the password on stdin, so it isn't in the command line:
 `printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC`
 
 ## AI apps (MCP)
-`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `search_logs`, `mark_log`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `read_telemetry` (live Panels values), `robot_data_runs`, `robot_data_summary`, `robot_data_rows`, `pi_log`, `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
+`mcp/server.py` gives AI apps these tools: `status`, `health`, `list_robots`, `scan`, `use_robot`, `upload`, `run_tests`, `logs`, `search_logs`, `mark_log`, `crashes`, `speed_test`, `backup`, `list_backups`, `restore_backup`, `open_panels`, `open_tuning`, `read_telemetry` (live Panels values), `robot_data_runs`, `robot_data_summary`, `robot_data_rows`, `pi_log`, `update_pi`, `disconnect`. `install.sh` sets it up; to do it by hand, it needs [uv](https://docs.astral.sh/uv/) (`brew install uv`):
 
 **Claude Code:**
 ```bash

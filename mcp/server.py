@@ -252,6 +252,17 @@ def open_panels() -> str:
 
 
 @mcp.tool()
+def open_tuning() -> str:
+    """Tunnel Pedro Pathing's AutoTune page to this Mac and return its address (http://localhost:10158).
+
+    Open it in a browser to run the Foresight, Mecanum and Pinpoint tuners. The robot's code must include
+    Pedro's tuning library (tuning 1.0.3 or newer: 1.0.2 crashes the robot app at start-up). The tuners drive
+    the robot by themselves, so a person must be there with room around the robot.
+    """
+    return run("tuning", "--no-open")
+
+
+@mcp.tool()
 async def read_telemetry(seconds: float = 3.0) -> str:
     """Listen to the robot's live Panels data for a few seconds and return the latest of each kind.
 

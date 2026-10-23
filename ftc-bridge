@@ -40,6 +40,8 @@
 #   ftc-bridge backups              list backups
 #   ftc-bridge restore ROBOT/TIME [--force]   put a backup's app and configs back on the robot
 #   ftc-bridge panels [--stop]      open the robot's Panels dashboard on this Mac (http://localhost:8001)
+#   ftc-bridge tuning [--stop]      open Pedro Pathing's AutoTune page on this Mac (http://localhost:10158): the
+#                                   Foresight, Mecanum and Pinpoint tuners (the robot drives itself: give it room)
 #   ftc-bridge adb ARGS...          any adb command against the robot, e.g. adb push x /sdcard/FIRST/
 #
 # Example for an agent:  printf '%s\n' 'the-password' | ftc-bridge add comp 12345-RC
@@ -58,6 +60,7 @@ STUDIO_JAVA="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 # Panels: 8001 web page, 8002 live data (the page connects to <its own host>:8002);
 # 5800/5801/5805/5807: the Limelight, which the Panels Limelight plugin passes through the hub.
 PANELS_PORTS="8001 8002 5800 5801 5805 5807"
+TUNING_PORTS="10158 12649"   # Pedro Pathing AutoTune: its page, and the WebSocket the page opens on the same host
 APP="com.qualcomm.ftcrobotcontroller"
 BACKUPS="$HOME/Library/Application Support/ftc-pi-bridge/backups"
 KEEP_BACKUPS=5
@@ -424,12 +427,24 @@ case "${1:-}" in
     echo "Panels: http://localhost:8001"
     [[ "${2:-}" == "--no-open" ]] || open "http://localhost:8001"
     ;;
+  tuning)
+    if [[ "${2:-}" == "--stop" ]]; then
+      for p in $TUNING_PORTS; do "$ADB" forward --remove "tcp:$p" >/dev/null 2>&1 || true; done
+      echo "Tuning tunnels closed."; exit 0
+    fi
+    quick_adb
+    for p in $TUNING_PORTS; do
+      "$ADB" forward "tcp:$p" "tcp:$p" >/dev/null || die "port $p is busy on this Mac (close whatever uses it)"
+    done
+    echo "Pedro tuning: http://localhost:10158 (needs Pedro's tuning library in the robot's code; the robot drives itself, give it room)"
+    [[ "${2:-}" == "--no-open" ]] || open "http://localhost:10158"
+    ;;
   adb)
     shift
     quick_adb
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,46p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 2   # (the help: the comment on top)
     ;;
 esac
