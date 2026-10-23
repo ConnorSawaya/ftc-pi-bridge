@@ -1,46 +1,49 @@
 #!/bin/bash
-# Re-plugs the USB link to the computer when it goes dead.
+# Brings the USB link to the computer back when it goes dead.
 #
-# Seen 2026-10-23 with a Mac, after ~25 minutes of use: the computer stops reaching the Pi while both ends
-# still think the cable is connected. The Pi keeps running and usb0 keeps its carrier, but nothing gets
-# through, and nothing on the Pi notices, so it stays dead until the cable is pulled.
+# Seen 2026-10-23 with a Mac (macOS 26), after 10-25 minutes of use: the computer stops reaching the Pi while
+# the Pi keeps running. Sometimes usb0 keeps its carrier and nothing on the Pi notices. Sometimes the Mac turns
+# its side off (its port shows "inactive") and the Pi only sees the link as disconnected, as if unplugged.
+# Either way it stays dead until the cable is pulled.
 #
 # Every PERIOD seconds this checks the computer still answers: a ping, or ARP, which a firewall can't block.
 # The computer is the newest DHCP lease on usb0. Once the computer has answered, if it stops answering for
-# DEAD_AFTER seconds while usb0 still says connected and the computer isn't asleep (USB "configured", not
-# "suspended"), this logs what it sees, then re-plugs the link in software. It unbinds the USB controller,
-# waits, and binds it again, so the computer sees the cable pulled and put back; the Pi keeps its power.
+# DEAD_AFTER seconds while it's still plugged in and awake (USB "configured", not "suspended" or "not
+# attached"), the link is dead, carrier or not. Then, in order, until the computer answers again:
+#   1. re-plug in software: unbind the USB controller, wait OFF_S seconds, bind it again, so the computer
+#      sees the cable pulled and put back while the Pi keeps its power;
+#   2. after RETRY_AFTER seconds without an answer, re-plug again, unplugged longer (TRIES re-plugs in all);
+#   3. still nothing: restart the Pi. That's what pulling the cable does (the whole Pi, its USB controller
+#      included, starts over), and pulling the cable has always brought it back. A re-plug alone sometimes
+#      hasn't: twice the Mac didn't bring its network back after one.
+# It does this once per loss: it acts again only after the computer has answered again, so an unplugged or
+# sleeping computer never makes it loop. Everything goes to the journal as "ftc-linkwatch", saved to the card
+# at once (a power cut can't lose it); `ftc-hub links` (ftc-bridge pi-log) counts it.
 #
-# The Pi offers two USB configurations: RNDIS for Windows and ECM for Macs. A Mac can come back on the
-# RNDIS one, which it has no driver for, so no network appears (seen in the second test, after a 2 s
-# re-plug). So if the computer isn't back RETRY_AFTER seconds after a re-plug and the Pi is still plugged
-# in, it re-plugs again, staying unplugged longer each time, up to TRIES times. Then it gives up and says to
-# pull the cable.
-#
-# It does all this once per loss: it acts again only after the computer has answered again, so an
-# unplugged or sleeping computer never makes it loop. Everything goes to the journal as "ftc-linkwatch";
-# `ftc-hub links` (ftc-bridge pi-log) counts it.
+# Testing only: FTC_LINKWATCH_TEST_NOREPLUG=1 makes the re-plugs do nothing, to see step 3 happen.
 set -u
 IF=usb0
 PERIOD=5
 DEAD_AFTER=20
 RETRY_AFTER=30
-TRIES=3
-OFF_S=5                                     # how long the first re-plug stays unplugged (more each try)
+TRIES=2
+OFF_S=5                                     # how long the first re-plug stays unplugged (more the next time)
 LEASES=/var/lib/NetworkManager/dnsmasq-$IF.leases
 DRV=/sys/bus/platform/drivers/dwc2
 
-log() { logger -t ftc-linkwatch -- "$*"; }
+log() { logger -t ftc-linkwatch -- "$*"; journalctl --sync 2>/dev/null; }   # (on the card now)
 udc() { ls /sys/class/udc 2>/dev/null | head -n 1; }
 usb_state() { local u; u="$(udc)"; cat "/sys/class/udc/$u/state" 2>/dev/null || echo none; }
+carrier() { cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo -; }
 computer() { [ -r "$LEASES" ] && sort -rn "$LEASES" | awk 'NR == 1 { print $3 }'; }
 count() { local v; v="$(cat "/sys/class/net/$IF/statistics/$1" 2>/dev/null)"; echo "${v:-0}"; }
 answers() {
-  [ -n "$1" ] || return 1
+  [ -n "$1" ] && [ -e "/sys/class/net/$IF" ] || return 1
   ping -c 1 -W 2 -I "$IF" "$1" >/dev/null 2>&1 || arping -q -c 1 -w 2 -I "$IF" "$1" >/dev/null 2>&1
 }
 
 replug() {   # $1: seconds to stay unplugged
+  if [ "${FTC_LINKWATCH_TEST_NOREPLUG:-}" = 1 ]; then log "(test: not re-plugging)"; return 0; fi
   local u; u="$(udc)"
   [ -n "$u" ] || { log "can't re-plug: no USB controller found"; return 1; }
   echo "$u" > "$DRV/unbind" 2>/dev/null
@@ -52,12 +55,19 @@ replug() {   # $1: seconds to stay unplugged
   modprobe -r g_ether 2>/dev/null; sleep 1; modprobe g_ether
 }
 
-log "watching the USB link: a check every ${PERIOD} s, a re-plug after ${DEAD_AFTER} s without an answer"
-seen=0; silent=0; replugged_at=0; lost_at=0; try=0; replugs=0; rx_ok=0; tx_ok=0
+log "watching the USB link: a check every ${PERIOD} s; dead after ${DEAD_AFTER} s without an answer:" \
+    "re-plug, re-plug again, then restart the Pi"
+seen=0; silent=0; replugged_at=0; lost_at=0; try=0; rx_ok=0; tx_ok=0; last_carrier="$(carrier)"
 while true; do
   sleep "$PERIOD"
   c="$(computer)"
   now="$(date +%s)"
+  state="$(usb_state)"
+  car="$(carrier)"
+  if [ "$car" != "$last_carrier" ]; then               # (rare: plugging in or out, or the computer turning its side off)
+    log "usb0 carrier $last_carrier -> $car (USB $state)"
+    last_carrier="$car"
+  fi
 
   # ---- after a re-plug: is the computer back?
   if [ "$replugged_at" -gt 0 ]; then
@@ -65,24 +75,24 @@ while true; do
       log "BACK: the computer ($c) answers again, $(( now - lost_at )) s after the link died ($try re-plug$([ "$try" = 1 ] || echo s))"
       replugged_at=0; try=0; seen=1; silent=0; rx_ok="$(count rx_packets)"; tx_ok="$(count tx_packets)"
     elif [ $(( now - replugged_at )) -ge "$RETRY_AFTER" ]; then
-      state="$(usb_state)"
       if [ "$state" = "not attached" ] || [ "$state" = none ]; then
         log "the computer was unplugged meanwhile: stopped trying"; replugged_at=0; try=0
       elif [ "$try" -lt "$TRIES" ]; then
         try=$(( try + 1 ))
-        log "still not back (USB $state, usb0 carrier $(cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo -)): re-plugging again, try $try of $TRIES, unplugged for $(( OFF_S * try )) s"
+        log "still not back (USB $state, usb0 carrier $car): re-plugging again, unplugged for $(( OFF_S * try )) s"
         replug $(( OFF_S * try )); replugged_at="$(date +%s)"
       else
-        log "NOT BACK after $TRIES re-plugs (USB $state): unplug the Pi and plug it back in"; replugged_at=0; try=0
+        log "RESTARTING THE PI: still not back $(( now - lost_at )) s after the link died, after $TRIES re-plugs" \
+            "(USB $state, usb0 carrier $car)"
+        systemctl reboot
+        exit 0
       fi
     fi
     continue
   fi
 
   # ---- watching
-  carrier="$(cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo 0)"
-  state="$(usb_state)"
-  if [ "$carrier" != 1 ] || [ "$state" != configured ] || [ -z "$c" ]; then
+  if [ "$state" != configured ] || [ -z "$c" ]; then
     silent=0; continue                       # unplugged, the computer asleep, or no computer yet: nothing to fix
   fi
   if answers "$c"; then
@@ -92,12 +102,11 @@ while true; do
   [ "$seen" = 1 ] || continue
   silent=$(( silent + PERIOD ))
   [ "$silent" -ge "$DEAD_AFTER" ] || continue
-  replugs=$(( replugs + 1 ))
-  log "LINK DEAD: the computer ($c) hasn't answered for ${silent} s, but usb0 says connected (USB $state)." \
-      "Since it last answered: $(( $(count rx_packets) - rx_ok )) packets in, $(( $(count tx_packets) - tx_ok )) out;" \
-      "errors in $(count rx_errors) out $(count tx_errors), dropped in $(count rx_dropped) out $(count tx_dropped)." \
-      "Kernel: $(dmesg | tail -n 3 | tr '\n' '|')"
-  log "re-plugging the USB link (#$replugs this run), unplugged for ${OFF_S} s"
+  log "LINK DEAD: the computer ($c) hasn't answered for ${silent} s; it's plugged in and awake (USB $state)," \
+      "usb0 carrier $car. Since it last answered: $(( $(count rx_packets) - rx_ok )) packets in," \
+      "$(( $(count tx_packets) - tx_ok )) out; errors in $(count rx_errors) out $(count tx_errors)," \
+      "dropped in $(count rx_dropped) out $(count tx_dropped). Kernel: $(dmesg | tail -n 3 | tr '\n' '|')"
+  log "re-plugging the USB link, unplugged for ${OFF_S} s"
   lost_at=$(( now - silent )); try=1
   replug "$OFF_S"
   replugged_at="$(date +%s)"; seen=0; silent=0

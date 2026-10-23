@@ -132,17 +132,19 @@ PY
   links)
     systemctl is-active --quiet ftc-linkwatch && echo "USB link watcher: on" ||
       echo "USB link watcher: OFF (ftc-bridge update-pi installs it)"
-    runs=0; dead=0; back=0; lost=0
+    runs=0; dead=0; back=0; lost=0; restarts=0
     while read -r idx _; do
       runs=$((runs + 1))
       ev="$(journalctl -b "$idx" -t ftc-linkwatch -q --no-pager 2>/dev/null || true)"
       dead=$((dead + $(grep -c 'LINK DEAD' <<<"$ev" || true)))
       back=$((back + $(grep -c 'BACK:' <<<"$ev" || true)))
       lost=$((lost + $(grep -c 'NOT BACK' <<<"$ev" || true)))
+      restarts=$((restarts + $(grep -c 'RESTARTING THE PI' <<<"$ev" || true)))
     done < <(journalctl --list-boots --no-pager -q 2>/dev/null)
-    echo "Dead links: $dead in the $runs saved runs ($back came back by themselves after the re-plug, $lost needed the cable pulled)"
+    echo "Dead links: $dead in the $runs saved runs ($back came back after a re-plug, $restarts needed the Pi restarted," \
+      "$lost needed the cable pulled)"
     # the last few, with how long the Pi had been running (minutes) when it happened
-    journalctl -t ftc-linkwatch -q --no-pager -o short-monotonic 2>/dev/null | grep -E 'LINK DEAD|BACK' | tail -n 6 |
+    journalctl -t ftc-linkwatch -q --no-pager -o short-monotonic 2>/dev/null | grep -E 'LINK DEAD|BACK|RESTARTING' | tail -n 6 |
       awk '{ up = 0; if (match($0, /^\[ *[0-9.]+\]/)) up = substr($0, RSTART + 1, RLENGTH - 2) + 0
              sub(/^.*ftc-linkwatch\[[0-9]+\]: /, "")
              printf "  %3d min after the Pi started: %s\n", up / 60, substr($0, 1, 150) }'

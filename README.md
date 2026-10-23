@@ -135,7 +135,7 @@ Paste this into your robot repo's `CLAUDE.md` / `AGENTS.md`:
 - **Before a match, disconnect the Pi** (⚙ → Disconnect from robot, `ftc-bridge disconnect`, or unplug it). Rule R704.C: only the Driver Station may be on the robot's Wi-Fi during a match.
 - **Shut down the Pi before unplugging it** (⚙ → Shut down Pi) to protect the SD card.
 - **Don't turn on macOS Internet Sharing for the Pi.** The Pi changes its address when you do.
-- **The USB link can go dead by itself** (seen with a Mac after about 25 minutes: the Pi keeps running, but the computer can't reach it until the cable is pulled). The Pi now catches that and re-plugs the link in software (trying again if the computer doesn't come back), back in about 40-60 s. The app tells you: **The Pi stopped answering**, then **The Pi is back**. `ftc-bridge pi-log` shows how often it happened.
+- **The USB link can go dead by itself** (seen with a Mac after 10-25 minutes: the Pi keeps running, but the computer can't reach it until the cable is pulled). The Pi now catches that: it re-plugs the link in software, then again, and if the computer still isn't back it restarts itself, like pulling the cable. Back within about 1-3 minutes. The app tells you: **The Pi stopped answering**, then **The Pi is back**. `ftc-bridge pi-log` shows how often it happened and what it took.
 - **Debugging the Pi:** `ssh -i ~/.ssh/ftcpi ftc@10.12.194.1`. The app's own log (the Pi coming and going, notifications sent) is `~/Library/Logs/ftc-bridge/app.log`.
 
 ## What's in here
