@@ -19,9 +19,14 @@ import websockets
 
 from mcp.server.mcpserver import MCPServer
 
-# The ftc-bridge command next to this folder, else whichever is on PATH.
+# The ftc-bridge command next to this folder (the PowerShell one on Windows), else whichever is on PATH.
 HERE = Path(__file__).resolve().parent
-BRIDGE = str(HERE.parent / "ftc-bridge") if (HERE.parent / "ftc-bridge").exists() else shutil.which("ftc-bridge") or "ftc-bridge"
+if os.name == "nt":
+    BRIDGE = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HERE.parent / "windows" / "ftc-bridge.ps1")]
+elif (HERE.parent / "ftc-bridge").exists():
+    BRIDGE = [str(HERE.parent / "ftc-bridge")]
+else:
+    BRIDGE = [shutil.which("ftc-bridge") or "ftc-bridge"]
 MAX_OUTPUT = 40_000  # characters; long logs are cut from the top
 
 mcp = MCPServer(
@@ -33,7 +38,7 @@ mcp = MCPServer(
 
 def run(*args: str, cwd: str | None = None, timeout: int = 60, ok: tuple[int, ...] = (0,)) -> str:
     try:
-        p = subprocess.run([BRIDGE, *args], cwd=cwd, capture_output=True, text=True, timeout=timeout,
+        p = subprocess.run([*BRIDGE, *args], cwd=cwd, capture_output=True, text=True, timeout=timeout,
                            stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return f"FAILED: ftc-bridge {' '.join(args)} took longer than {timeout} s"

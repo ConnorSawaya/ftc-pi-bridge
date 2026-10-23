@@ -26,6 +26,15 @@ Mac ──USB──► Raspberry Pi Zero 2 W ──Wi-Fi──► Control Hub
 4. Put the card in the Pi. Plug the Pi's **middle** micro-USB port (labelled USB, not PWR) into the Mac. Wait ~3 minutes the first time.
 5. Save your robots: in the menu bar app, **Add robot**, pick your robot from the list, type its Wi-Fi password, **Save & Connect**. Or in the terminal: `ftc-bridge add comp 12345-RC` (asks for the password).
 
+## Windows
+Teammates on Windows can use the Pi too, from a terminal and AI apps (there's no tray app; the SD card is made on a Mac).
+1. Install Android Studio, and Raspberry Pi's USB driver: `rpi-usb-gadget-driver-setup.exe` from the [rpi-usb-gadget releases](https://github.com/raspberrypi/rpi-usb-gadget/releases).
+2. In the repo folder: `powershell -ExecutionPolicy Bypass -File windows\install.ps1`. It puts `ftc-bridge` on your PATH, adds the AI tools, and makes this PC's key.
+3. The Pi only lets in computers it knows. The installer copies this PC's key; whoever set up the Pi runs `ftc-bridge add-key "<that key>"` once, with the Pi plugged in.
+4. Then the same `ftc-bridge` commands work, e.g. `ftc-bridge status`, `ftc-bridge upload comp`.
+
+Don't turn on Internet Connection Sharing for the Pi.
+
 ## Every time
 1. Plug in the Pi and turn on the robot. The menu bar icon shows radio waves when it's connected.
 2. In Android Studio, pick the Control Hub and press Run. The app connects adb for you (without the app: `adb connect 10.12.194.1:5555`).
@@ -60,6 +69,8 @@ ftc-bridge forget NAME          delete a saved robot
 ftc-bridge disconnect           take the Pi off the robot's Wi-Fi
 ftc-bridge reboot | shutdown    restart or shut down the Pi
 ftc-bridge update-pi            update the Pi's software from this Mac
+ftc-bridge key                  this computer's public key
+ftc-bridge add-key "KEY"        let another computer (e.g. a teammate's PC) use the Pi
 ftc-bridge health               signal, channel, robot app, adb, and whether it's the same hub as before
 ftc-bridge speedtest            real upload speed to the robot
 ftc-bridge upload [NAME]        send code to the robot (run in the robot project); uses Sloth if the project has it
@@ -123,6 +134,7 @@ Paste this into your robot repo's `CLAUDE.md` / `AGENTS.md`:
 | `ftc-bridge` | The terminal command |
 | `mcp/server.py` | The MCP server for AI apps |
 | `mac/` | The FTC Bridge menu bar app |
+| `windows/` | `ftc-bridge` and the installer for Windows |
 
 ## License
 MIT

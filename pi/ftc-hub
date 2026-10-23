@@ -53,6 +53,7 @@ case "${1:-}" in
   add)
     NAME="${2:-}"; check_name "$NAME"
     IFS= read -r SSID; IFS= read -r PSK
+    SSID="${SSID%$'\r'}"; PSK="${PSK%$'\r'}"  # Windows sends line endings with a \r
     [[ ${#SSID} -ge 1 && ${#SSID} -le 32 ]] || { echo "Wi-Fi name must be 1-32 characters"; exit 1; }
     [[ ${#PSK} -ge 8 && ${#PSK} -le 63 ]] || { echo "Password must be 8-63 characters"; exit 1; }
     nmcli con delete "$PREFIX$NAME" >/dev/null 2>&1 || true

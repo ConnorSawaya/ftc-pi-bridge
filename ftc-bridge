@@ -11,6 +11,8 @@
 #   ftc-bridge reboot | shutdown    restart or shut down the Pi (shut down before unplugging)
 #   ftc-bridge health               Wi-Fi signal and channel, robot app, adb, and whether it's the same hub as before
 #   ftc-bridge speedtest            real upload speed to the robot (sends 8 MB through adb, then deletes it)
+#   ftc-bridge key                  this computer's public key (to give to whoever set up the Pi)
+#   ftc-bridge add-key "KEY"        let another computer (e.g. a teammate's Windows PC) use the Pi
 #   ftc-bridge pi-version           the Pi's software version, and the one on this Mac
 #   ftc-bridge update-pi            update the Pi's software from this Mac (takes a few seconds)
 #
@@ -228,6 +230,21 @@ case "${1:-}" in
     fi
     [[ $ok == 1 ]] || exit 1
     ;;
+  key)
+    if [[ ! -f "$HOME/.ssh/ftcpi" ]]; then
+      mkdir -p "$HOME/.ssh"; ssh-keygen -q -t ed25519 -N "" -C "ftcpi-$(hostname -s)" -f "$HOME/.ssh/ftcpi"
+    fi
+    cat "$HOME/.ssh/ftcpi.pub"
+    ;;
+  add-key)
+    KEY="${*:2}"
+    [[ "$KEY" =~ ^ssh-(ed25519|rsa)\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9._@-]+)?$ ]] ||
+      die "that doesn't look like a public key (it starts with ssh-ed25519). Get it with: ftc-bridge key"
+    printf '%s\n' "$KEY" | ssh "${SSH_OPTS[@]}" "$PI" \
+      'IFS= read -r k; grep -qxF "$k" ~/.ssh/authorized_keys 2>/dev/null && echo "That computer already has access." ||
+       { printf "%s\n" "$k" >> ~/.ssh/authorized_keys; echo "Added. That computer can use the Pi now."; }' ||
+      die "can't reach the Pi. Is it plugged into this Mac?"
+    ;;
   pi-version)
     installed="$(installed_pi_version)"; latest="$(latest_pi_version)"
     echo "installed=$installed"; echo "latest=$latest"
@@ -358,6 +375,6 @@ case "${1:-}" in
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,42p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac

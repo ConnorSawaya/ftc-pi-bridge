@@ -1,0 +1,8 @@
+# Keep Unix line endings everywhere: pi/ files are copied to the Pi and bash breaks on Windows
+# line endings (Git for Windows converts them by default). The Pi software's version is also a
+# fingerprint of these exact bytes, so Mac and Windows checkouts must match.
+* text=auto eol=lf
+*.png binary
+*.icns binary
+# Windows batch files want Windows line endings.
+*.cmd text eol=crlf
