@@ -7,11 +7,14 @@
 #   ftc-hub add NAME      ->  saves a robot; reads its Wi-Fi name, then password, from stdin (one per line)
 #   ftc-hub use NAME      ->  switches the Pi to that robot's Wi-Fi
 #   ftc-hub forget NAME   ->  deletes a saved robot
+#   ftc-hub health        ->  Wi-Fi signal/channel, whether the robot app and adb answer, and the hub's
+#                             serial compared with the one saved for this robot (is it the right robot?)
 #   ftc-hub disconnect    ->  leaves the robot's Wi-Fi and stays off it (before a match: rule R704.C)
 #   ftc-hub power reboot|off  ->  restarts or shuts down the Pi (shut down before unplugging)
 set -euo pipefail
 HUB_IP=192.168.43.1
 PREFIX=robot-  # each robot is a NetworkManager connection called robot-<name>
+STATE=/var/lib/ftc-hub  # <name>.serial: the hub serial first seen for each robot
 
 wifi_on() {  # Raspberry Pi OS starts with Wi-Fi switched off in NetworkManager
   rfkill unblock wifi 2>/dev/null || true
@@ -53,6 +56,7 @@ case "${1:-}" in
     [[ ${#SSID} -ge 1 && ${#SSID} -le 32 ]] || { echo "Wi-Fi name must be 1-32 characters"; exit 1; }
     [[ ${#PSK} -ge 8 && ${#PSK} -le 63 ]] || { echo "Password must be 8-63 characters"; exit 1; }
     nmcli con delete "$PREFIX$NAME" >/dev/null 2>&1 || true
+    rm -f "$STATE/$NAME.serial"  # re-saving a robot may mean a different hub
     # The password is briefly in nmcli's argv; fine on this single-user Pi.
     nmcli con add type wifi con-name "$PREFIX$NAME" ifname wlan0 ssid "$SSID" \
       wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no >/dev/null
@@ -71,7 +75,43 @@ case "${1:-}" in
   forget)
     NAME="${2:-}"; check_name "$NAME"; require_saved "$NAME"
     nmcli con delete "$PREFIX$NAME" >/dev/null
+    rm -f "$STATE/$NAME.serial"
     echo "Forgot $NAME"
+    ;;
+  health)
+    ROBOT="$(nmcli -t -g NAME con show --active | sed -n "s/^$PREFIX//p" | head -1)"
+    echo "robot=$ROBOT"
+    # The connected network's signal (0-100), frequency, channel and link rate.
+    nmcli -t -f IN-USE,SIGNAL,FREQ,CHAN,RATE dev wifi list --rescan no 2>/dev/null |
+      awk -F: '$1=="*" {print "signal="$2; print "freq="$3; print "channel="$4; print "rate="$5; exit}'
+    if nc -z -w 2 "$HUB_IP" 5555 2>/dev/null; then echo "adb_port=open"; else echo "adb_port=closed"; fi
+    # The Robot Controller app's own status page. (It also holds the Wi-Fi password: never print it.)
+    INFO="$(python3 - "$HUB_IP" <<'PY'
+import json, sys, urllib.request
+try:
+    d = json.load(urllib.request.urlopen(f"http://{sys.argv[1]}:8080/js/rcInfo.json", timeout=2))
+except Exception:
+    print("rc_app=down"); sys.exit()
+print("rc_app=up")
+for key in ("serialNumber", "networkName", "activeConfigName", "sdkVersion", "supports5GhzAp"):
+    if d.get(key) is not None: print(f"{key}={d[key]}")
+ch = d.get("currentChannel")
+if isinstance(ch, dict): ch = ch.get("displayName") or ch.get("name") or ch.get("channelNum")
+if ch is not None: print(f"hubChannel={ch}")
+PY
+)"
+    echo "$INFO"
+    SERIAL="$(sed -n 's/^serialNumber=//p' <<<"$INFO")"
+    if [[ -n "$ROBOT" && -n "$SERIAL" ]]; then
+      mkdir -p "$STATE"
+      if [[ ! -f "$STATE/$ROBOT.serial" ]]; then
+        echo "$SERIAL" > "$STATE/$ROBOT.serial"; echo "same_hub=first_time"
+      elif [[ "$(cat "$STATE/$ROBOT.serial")" == "$SERIAL" ]]; then
+        echo "same_hub=yes"
+      else
+        echo "same_hub=no"; echo "saved_serial=$(cat "$STATE/$ROBOT.serial")"
+      fi
+    fi
     ;;
   disconnect)
     for r in $(saved); do nmcli con modify "$PREFIX$r" connection.autoconnect no; done
@@ -87,6 +127,6 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: ftc-hub status|scan|list|add NAME|use NAME|forget NAME|disconnect|power reboot|off" >&2; exit 2
+    echo "usage: ftc-hub status|scan|list|add NAME|use NAME|forget NAME|health|disconnect|power reboot|off" >&2; exit 2
     ;;
 esac

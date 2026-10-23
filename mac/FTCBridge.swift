@@ -90,9 +90,74 @@ enum Prefs {
     static let showName = "showRobotNameInMenuBar"
     static let notify = "notifyOnConnectionChange"
     static let autoADB = "connectAndroidStudioAutomatically"
+    static let crashAlerts = "crashAlerts"
 
     static func register() {
-        UserDefaults.standard.register(defaults: [autoADB: true])
+        UserDefaults.standard.register(defaults: [autoADB: true, crashAlerts: true])
+    }
+}
+
+/// The `ftc-bridge` command, bundled inside the app (build.sh copies it in).
+enum BridgeCLI {
+    static let path = Bundle.main.path(forResource: "ftc-bridge", ofType: nil)
+    static let backupsFolder = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/ftc-pi-bridge/backups")
+
+    static func run(_ args: [String]) async -> (ok: Bool, output: String) {
+        guard let path else { return (false, "ftc-bridge is missing from the app. Rebuild it with mac/build.sh.") }
+        return await execute("/bin/bash", [path] + args)
+    }
+}
+
+/// What `ftc-hub health` and adb say about the connection to the robot.
+struct Health {
+    var signal: Int?           // 0-100
+    var freq = ""              // e.g. "2437 MHz"
+    var channel = ""
+    var rate = ""              // e.g. "65 Mbit/s"
+    var robotApp = false
+    var sdk = ""
+    var hubSerial = ""
+    var sameHub = ""           // yes, first_time or no
+    var adb = false
+    var adbSerial = ""
+
+    var band: String { freq.hasPrefix("5") ? "5 GHz" : freq.hasPrefix("2") ? "2.4 GHz" : "" }
+    var rightRobot: Bool { sameHub != "no" && (adbSerial.isEmpty || hubSerial.isEmpty || adbSerial == hubSerial) }
+}
+
+/// A crash or exception found in the robot's log.
+struct Crash: Equatable {
+    let id: String             // the log line that reported it (it includes the time)
+    let summary: String        // e.g. "NullPointerException: Attempt to invoke ... on a null object reference"
+    let location: String       // e.g. "MyTeleOp.java:212", or "" if not in team code
+    let time: String
+    let text: String           // the whole block, to copy for an AI or a teammate
+
+    /// What the FTC SDK and Android log when robot code throws, freezes or crashes the app.
+    static let triggers = ["User code threw an uncaught exception", "User OpMode was stuck in", "FATAL EXCEPTION"]
+
+    /// Finds crashes in `logcat -v time` output.
+    static func find(in log: String) -> [Crash] {
+        let lines = log.components(separatedBy: "\n")
+        func message(_ line: String) -> String {
+            guard let r = line.range(of: "): ") else { return line }
+            return String(line[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        return lines.indices.compactMap { i in
+            let line = lines[i]
+            guard triggers.contains(where: line.contains) else { return nil }
+            let block = Array(lines[i..<min(i + 15, lines.count)])
+            let exception = block.dropFirst().map(message).first { $0.contains("Exception") || $0.contains("Error") }
+            var location = ""
+            if let frame = block.first(where: { $0.contains("at org.firstinspires.ftc.teamcode.") }),
+               let open = frame.lastIndex(of: "("), let close = frame.lastIndex(of: ")"), open < close {
+                location = String(frame[frame.index(after: open)..<close])
+            }
+            // "10-22 18:01:02.200 E/..." -> "18:01:02"
+            let time = line.split(separator: " ").dropFirst().first.map { String($0.prefix(8)) } ?? ""
+            return Crash(id: line, summary: exception ?? message(line), location: location, time: time,
+                         text: block.joined(separator: "\n"))
+        }
     }
 }
 
@@ -109,11 +174,25 @@ final class Bridge: ObservableObject {
     @Published var messageIsError = false
     @Published var busy = false
     @Published var scanning = false
+    @Published var health: Health?
+    @Published var speed = ""          // last speed test, e.g. "3.2 MB/s"
+    @Published var lastCrash: Crash?
     private var checkedOnce = false    // no notification for the state the app starts in
     private var adbRobot = ""          // robot adb is connected to, so a switch reconnects it
+    private var seenCrashes: Set<String> = []
+    private var crashBaselineRobot = ""  // crashes already in the log when we connected aren't alerted
 
     init() {
-        Task { while true { await refresh(); try? await Task.sleep(for: .seconds(5)) } }
+        Task {
+            var tick = 0
+            while true {
+                await refresh()
+                if tick % 2 == 0 { await checkCrashes() }    // every 10 s
+                if tick % 3 == 0 { await refreshHealth() }   // every 15 s
+                tick += 1
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
     }
 
     var icon: String {
@@ -206,11 +285,84 @@ final class Bridge: ObservableObject {
     }
 
     func use(_ name: String) async {
+        speed = ""
+        health = nil
         _ = await perform("Switching to \(name)…") { await Pi.run(["use", name]) }
+        await refreshHealth()
     }
 
     func forget(_ name: String) async {
         _ = await perform("Forgetting \(name)…") { await Pi.run(["forget", name]) }
+    }
+
+    func refreshHealth() async {
+        guard link != .noPi, !robot.isEmpty else { health = nil; return }
+        let result = await Pi.run(["health"])
+        guard result.ok else { return }
+        var f: [String: String] = [:]
+        for line in result.output.split(separator: "\n") {
+            if let eq = line.firstIndex(of: "=") { f[String(line[..<eq])] = String(line[line.index(after: eq)...]) }
+        }
+        var h = Health()
+        h.signal = f["signal"].flatMap { Int($0) }
+        h.freq = f["freq"] ?? ""
+        h.channel = f["channel"] ?? ""
+        h.rate = f["rate"] ?? ""
+        h.robotApp = f["rc_app"] == "up"
+        h.sdk = f["sdkVersion"] ?? ""
+        h.hubSerial = f["serialNumber"] ?? ""
+        h.sameHub = f["same_hub"] ?? ""
+        if f["adb_port"] == "open" && ADB.path != nil, await ADB.isConnected() {
+            h.adb = true
+            h.adbSerial = await ADB.run(["-s", ADB.serial, "shell", "getprop", "ro.serialno"]).output
+        }
+        health = h
+    }
+
+    /// Looks for new crashes in the robot's log and alerts once per crash.
+    func checkCrashes() async {
+        guard UserDefaults.standard.bool(forKey: Prefs.crashAlerts), link == .connected, !adbRobot.isEmpty else { return }
+        let result = await ADB.run(["-s", ADB.serial, "logcat", "-d", "-v", "time", "-t", "1500"])
+        guard result.ok else { return }
+        let crashes = Crash.find(in: result.output)
+        if crashBaselineRobot != adbRobot {
+            seenCrashes = Set(crashes.map(\.id))
+            crashBaselineRobot = adbRobot
+            return
+        }
+        for crash in crashes where !seenCrashes.contains(crash.id) {
+            seenCrashes.insert(crash.id)
+            lastCrash = crash
+            let content = UNMutableNotificationContent()
+            content.title = "Robot code crashed on \(robot)"
+            content.body = crash.location.isEmpty ? crash.summary : "\(crash.summary)\nat \(crash.location)"
+            content.sound = .default
+            try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: crash.id, content: content, trigger: nil))
+        }
+    }
+
+    func speedTest() async {
+        busy = true
+        messageIsError = false
+        message = "Sending 8 MB to the robot…"
+        let result = await BridgeCLI.run(["speedtest"])
+        busy = false
+        if result.ok, let r = result.output.range(of: #"[0-9.]+ MB/s"#, options: .regularExpression) {
+            speed = String(result.output[r])
+            message = ""
+        } else {
+            showError(result.output.split(separator: "\n").last.map(String.init) ?? "Speed test failed")
+        }
+    }
+
+    func backupNow() async {
+        busy = true
+        messageIsError = false
+        message = "Backing up \(robot)…"
+        let result = await BridgeCLI.run(["backup"])
+        busy = false
+        if result.ok { message = result.output.split(separator: "\n").last.map(String.init) ?? "Backed up." }
+        else { showError(result.output.split(separator: "\n").last.map(String.init) ?? "Backup failed") }
     }
 
     /// Tunnels the robot's Panels dashboard to this Mac and opens it in the browser.
@@ -300,6 +452,29 @@ struct SectionTitle: View {
     }
 }
 
+/// One line of the health card: icon, label, value, and a green/orange dot (none if `good` is nil).
+struct HealthRow: View {
+    let icon: String
+    let label: String
+    let value: String
+    let good: Bool?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).frame(width: 18).foregroundStyle(.secondary)
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).lineLimit(1)
+            if let good {
+                Circle().fill(good ? Color.green : Color.orange).frame(width: 7, height: 7)
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 1)
+    }
+}
+
 /// A setting with a small switch on the right.
 struct SwitchRow: View {
     let title: String
@@ -355,6 +530,7 @@ struct Panel: View {
     @AppStorage(Prefs.showName) private var showName = false
     @AppStorage(Prefs.notify) private var notify = false
     @AppStorage(Prefs.autoADB) private var autoADB = true
+    @AppStorage(Prefs.crashAlerts) private var crashAlerts = true
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var confirmShutdown = false
 
@@ -404,11 +580,67 @@ struct Panel: View {
             ActionRow(icon: "chart.xyaxis.line", title: "Open Panels", detail: "Telemetry, graphs, OpMode control",
                       enabled: !bridge.busy) { Task { await bridge.openPanels() } }
         }
+        if let crash = bridge.lastCrash { crashCard(crash) }
         if bridge.link != .noPi {
+            if !bridge.robot.isEmpty {
+                Divider()
+                healthCard
+            }
             Divider()
             robotList
             Divider()
             if adding { addForm } else { addButton }
+        }
+    }
+
+    private func crashCard(_ crash: Crash) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label("Robot code crashed", systemImage: "exclamationmark.octagon.fill")
+                    .font(.callout.weight(.semibold)).foregroundStyle(.red)
+                Spacer()
+                Text(crash.time).font(.caption2).foregroundStyle(.secondary)
+                Button { bridge.lastCrash = nil } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary).help("Dismiss")
+            }
+            Text(crash.summary).font(.caption).lineLimit(3)
+            if !crash.location.isEmpty {
+                Text("at \(crash.location)").font(.caption.monospaced()).foregroundStyle(.secondary)
+            }
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(crash.text, forType: .string)
+            } label: { Label("Copy error", systemImage: "doc.on.doc") }
+                .buttonStyle(.borderless).font(.caption)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.1)))
+    }
+
+    private var healthCard: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            SectionTitle(text: "HEALTH")
+            if let h = bridge.health {
+                HealthRow(icon: "wifi", label: "Wi-Fi",
+                          value: h.signal.map { "\($0)%" + (h.band.isEmpty ? "" : " · \(h.band)") + (h.channel.isEmpty ? "" : " ch \(h.channel)") } ?? "Not connected",
+                          good: (h.signal ?? 0) >= 40)
+                HealthRow(icon: "app.badge.checkmark", label: "Robot app",
+                          value: h.robotApp ? "Running" + (h.sdk.isEmpty ? "" : " · SDK \(h.sdk)") : "Not answering",
+                          good: h.robotApp)
+                HealthRow(icon: "cable.connector", label: "adb",
+                          value: h.adb ? "Connected" : "Not connected", good: h.adb)
+                HealthRow(icon: "checkmark.shield", label: "Right robot",
+                          value: !h.rightRobot ? "Different hub!" : h.sameHub == "first_time" ? "Hub saved" : h.hubSerial.isEmpty ? "Unknown" : "Same hub",
+                          good: h.rightRobot && !h.hubSerial.isEmpty)
+                HStack {
+                    HealthRow(icon: "speedometer", label: "Upload speed", value: bridge.speed.isEmpty ? "–" : bridge.speed, good: nil)
+                    Button("Test") { Task { await bridge.speedTest() } }
+                        .buttonStyle(.borderless).font(.caption)
+                        .disabled(bridge.busy || !h.adb)
+                }
+            } else {
+                Text("Checking…").font(.callout).foregroundStyle(.secondary).padding(.horizontal, 8)
+            }
         }
     }
 
@@ -561,7 +793,7 @@ struct Panel: View {
     // MARK: Settings page
 
     private var version: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3"
     }
 
     @ViewBuilder private var settingsPage: some View {
@@ -582,6 +814,18 @@ struct Panel: View {
             SwitchRow(title: "Robot name in menu bar", isOn: $showName)
             SwitchRow(title: "Connect Android Studio", detail: "The robot shows up in Android Studio by itself", isOn: $autoADB)
             SwitchRow(title: "Notifications", detail: "When the robot connects or drops", isOn: Binding(get: { notify }, set: setNotify))
+            SwitchRow(title: "Crash alerts", detail: "When robot code throws or freezes", isOn: Binding(get: { crashAlerts }, set: setCrashAlerts))
+        }
+
+        Divider()
+        VStack(alignment: .leading, spacing: 2) {
+            SectionTitle(text: "ROBOT")
+            ActionRow(icon: "externaldrive.badge.timemachine", title: "Back up robot", detail: "Its configs and app, to this Mac",
+                      enabled: !bridge.busy && bridge.link == .connected) { Task { await bridge.backupNow() } }
+            ActionRow(icon: "folder", title: "Show backups", detail: "Restore with ftc-bridge restore") {
+                try? FileManager.default.createDirectory(at: BridgeCLI.backupsFolder, withIntermediateDirectories: true)
+                NSWorkspace.shared.open(BridgeCLI.backupsFolder)
+            }
         }
 
         Divider()
@@ -628,6 +872,11 @@ struct Panel: View {
         }
     }
 
+    private func setCrashAlerts(_ on: Bool) {
+        crashAlerts = on
+        if on { Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) } }
+    }
+
     private func setNotify(_ on: Bool) {
         notify = on
         guard on else { return }
@@ -671,6 +920,9 @@ struct FTCBridgeApp: App {
 
     init() {
         Prefs.register()
+        if UserDefaults.standard.bool(forKey: Prefs.crashAlerts) {
+            Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
+        }
     }
 
     var body: some Scene {

@@ -9,15 +9,22 @@
 #   ftc-bridge forget NAME          delete a saved robot
 #   ftc-bridge disconnect           take the Pi off the robot's Wi-Fi (before a match: rule R704.C)
 #   ftc-bridge reboot | shutdown    restart or shut down the Pi (shut down before unplugging)
+#   ftc-bridge health               Wi-Fi signal and channel, robot app, adb, and whether it's the same hub as before
+#   ftc-bridge speedtest            real upload speed to the robot (sends 8 MB through adb, then deletes it)
 #
 #   Run these from the robot project folder:
 #   ftc-bridge upload [NAME]        send code to the robot. Uses Sloth hot reload (~1 s) if the
 #                                   project has it, otherwise a full install. NAME switches robot first.
 #   ftc-bridge upload --full [NAME] full install + app restart (needed after changing libraries
-#                                   or Gradle files, or code outside the teamcode package)
+#                                   or Gradle files, or code outside the teamcode package).
+#                                   Backs up the robot first.
 #   ftc-bridge test                 run the TeamCode unit tests on this Mac (no robot needed)
 #
 #   ftc-bridge logs [--errors] [N]  last N lines (default 300) of the robot's log
+#   ftc-bridge crashes [N]          crashes and exceptions in the last N log lines (default 3000)
+#   ftc-bridge backup               save the robot's configs and app to this Mac (newest 5 kept per robot)
+#   ftc-bridge backups              list backups
+#   ftc-bridge restore ROBOT/TIME [--force]   put a backup's app and configs back on the robot
 #   ftc-bridge panels [--stop]      open the robot's Panels dashboard on this Mac (http://localhost:8001)
 #   ftc-bridge adb ARGS...          any adb command against the robot, e.g. adb push x /sdcard/FIRST/
 #
@@ -32,6 +39,11 @@ STUDIO_JAVA="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 # Panels: 8001 web page, 8002 live data (the page connects to <its own host>:8002);
 # 5800/5801/5805/5807: the Limelight, which the Panels Limelight plugin passes through the hub.
 PANELS_PORTS="8001 8002 5800 5801 5805 5807"
+APP="com.qualcomm.ftcrobotcontroller"
+BACKUPS="$HOME/Library/Application Support/ftc-pi-bridge/backups"
+KEEP_BACKUPS=5
+# What the FTC SDK and Android log when robot code throws, freezes or crashes the app.
+CRASH_PATTERN='User code threw an uncaught exception|User OpMode was stuck in|FATAL EXCEPTION'
 
 die() { echo "error: $*" >&2; exit 1; }
 check_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "robot names can use letters, numbers, . _ - (up to 32)"; }
@@ -74,6 +86,26 @@ gradle() {
   ./gradlew "$@"
 }
 
+hub_serial() { "$ADB" shell getprop ro.serialno 2>/dev/null | tr -d '\r'; }
+
+# Saves the robot's configs and app to BACKUPS/<robot>/<time>/, keeping the newest KEEP_BACKUPS.
+backup_robot() {
+  local robot dir apk configs
+  robot="$(field robot <<<"$(pi status)")"; [[ -n "$robot" ]] || robot=unknown
+  dir="$BACKUPS/$robot/$(date +%Y-%m-%d_%H%M%S)"
+  mkdir -p "$dir/configs"
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && { "$ADB" pull "$f" "$dir/configs/" >/dev/null 2>&1 || true; }
+  done < <("$ADB" shell 'ls /sdcard/FIRST/*.xml 2>/dev/null' | tr -d '\r')
+  apk="$("$ADB" shell pm path "$APP" 2>/dev/null | tr -d '\r' | sed -n 's/^package://p' | head -1)"
+  [[ -n "$apk" ]] && { "$ADB" pull "$apk" "$dir/robot-app.apk" >/dev/null 2>&1 || true; }
+  printf 'robot=%s\nhub_serial=%s\ntime=%s\n' "$robot" "$(hub_serial)" "$(date)" > "$dir/info.txt"
+  configs=$(ls "$dir/configs" | wc -l | tr -d ' ')
+  echo "Backed up $robot: $configs config(s)$([[ -f "$dir/robot-app.apk" ]] && echo ' and the app') -> $robot/$(basename "$dir")"
+  ls -1d "$BACKUPS/$robot"/*/ 2>/dev/null | sort -r | tail -n +$((KEEP_BACKUPS + 1)) |
+    while IFS= read -r old; do rm -rf "$old"; done
+}
+
 has_sloth() { grep -qsi sloth TeamCode/build.gradle* build.gradle* build.dependencies.gradle; }
 
 case "${1:-}" in
@@ -101,6 +133,7 @@ case "${1:-}" in
       gradle :TeamCode:deploySloth
       echo "Uploaded with Sloth. Changes load when the current OpMode stops."
     else
+      backup_robot || echo "(backup failed; installing anyway)"
       # Sloth's hot-loaded code survives installs and would override the new app, so clear it first.
       if has_sloth; then gradle :TeamCode:removeSlothRemote :TeamCode:installDebug; else gradle :TeamCode:installDebug; fi
       "$ADB" shell am start -n "$RC_ACTIVITY" >/dev/null
@@ -108,6 +141,92 @@ case "${1:-}" in
     fi
     ;;
   test) gradle :TeamCode:testDebugUnitTest ;;
+  health)
+    H="$(pi health)"
+    ok=1
+    robot="$(field robot <<<"$H")"
+    [[ -n "$robot" ]] || { echo "No robot chosen (ftc-bridge use NAME)"; exit 1; }
+    echo "Robot:     $robot"
+    if [[ -n "$(field signal <<<"$H")" ]]; then
+      echo "Wi-Fi:     signal $(field signal <<<"$H")/100, $(field freq <<<"$H") (channel $(field channel <<<"$H")), $(field rate <<<"$H")"
+    else
+      echo "Wi-Fi:     not connected to the robot's Wi-Fi. Is the robot on?"; ok=0
+    fi
+    if [[ "$(field rc_app <<<"$H")" == up ]]; then
+      echo "Robot app: running (SDK $(field sdkVersion <<<"$H"), config \"$(field activeConfigName <<<"$H")\", hub Wi-Fi $(field hubChannel <<<"$H"))"
+    else
+      echo "Robot app: not answering (is the Robot Controller app running?)"; ok=0
+    fi
+    serial="$(field serialNumber <<<"$H")"
+    case "$(field same_hub <<<"$H")" in
+      yes) echo "Hub:       $serial, the same hub as before" ;;
+      first_time) echo "Hub:       $serial, saved as $robot's hub" ;;
+      no) echo "Hub:       $serial, a DIFFERENT hub than $robot had before ($(field saved_serial <<<"$H")). Check you're on the right robot."; ok=0 ;;
+    esac
+    if [[ "$(field adb_port <<<"$H")" == open ]]; then
+      "$ADB" disconnect "$ADB_SERIAL" >/dev/null 2>&1 || true
+      if "$ADB" connect "$ADB_SERIAL" | grep -q 'connected to'; then
+        adb_serial="$("$ADB" -s "$ADB_SERIAL" shell getprop ro.serialno 2>/dev/null | tr -d '\r')"
+        if [[ -n "$serial" && "$adb_serial" != "$serial" ]]; then
+          echo "adb:       connected, but to hub $adb_serial, not $serial"; ok=0
+        else
+          echo "adb:       connected${adb_serial:+ to hub $adb_serial}"
+        fi
+      else
+        echo "adb:       the robot's adb port is open but adb couldn't connect"; ok=0
+      fi
+    else
+      echo "adb:       not reachable (robot off, or its adb is off)"; ok=0
+    fi
+    [[ $ok == 1 ]] || exit 1
+    ;;
+  speedtest)
+    connect_adb >/dev/null
+    f="$(mktemp)"; head -c 8000000 /dev/urandom > "$f"  # random, so nothing can compress it
+    out="$("$ADB" push "$f" /data/local/tmp/ftc-bridge-speedtest 2>&1 | tail -1)" || true
+    rm -f "$f"; "$ADB" shell rm -f /data/local/tmp/ftc-bridge-speedtest >/dev/null 2>&1 || true
+    speed="$(grep -oE '[0-9.]+ MB/s \([0-9]+ bytes in [0-9.]+s\)' <<<"$out")" || die "speed test failed: $out"
+    echo "Upload speed: $speed"
+    ;;
+  crashes)
+    connect_adb >/dev/null
+    "$ADB" logcat -d -v time -t "${2:-3000}" | tr -d '\r' |
+      awk -v pat="$CRASH_PATTERN" '$0 ~ pat {n = 14; found = 1; print "----"} n > 0 {print; n--}
+        END {if (!found) print "No crashes in the recent log."}'
+    ;;
+  backup)
+    connect_adb >/dev/null
+    backup_robot
+    ;;
+  backups)
+    [[ -d "$BACKUPS" ]] || { echo "No backups yet."; exit 0; }
+    (cd "$BACKUPS" && for d in */*/; do
+      d="${d%/}"; [[ -f "$d/info.txt" ]] || continue
+      echo "$d  ($(ls "$d/configs" | wc -l | tr -d ' ') configs$([[ -f "$d/robot-app.apk" ]] && echo ', app'))"
+    done | sort -r)
+    ;;
+  restore)
+    [[ -n "${2:-}" ]] || die "usage: ftc-bridge restore ROBOT/TIME [--force]   (ftc-bridge backups lists them)"
+    dir="$BACKUPS/$2"
+    [[ -f "$dir/info.txt" ]] || die "no backup called $2 (ftc-bridge backups lists them)"
+    FORCE=""; [[ "${3:-}" == "--force" ]] && FORCE=1
+    connect_adb
+    want="$(field hub_serial < "$dir/info.txt")"; have="$(hub_serial)"
+    [[ -z "$want" || "$want" == "$have" || -n "$FORCE" ]] ||
+      die "that backup is from a different hub ($want; this one is $have). Add --force to restore it anyway."
+    if [[ -f "$dir/robot-app.apk" ]]; then
+      out="$("$ADB" install -r -d "$dir/robot-app.apk" 2>&1)" || true
+      if grep -q INSTALL_FAILED_UPDATE_INCOMPATIBLE <<<"$out"; then
+        [[ -n "$FORCE" ]] || die "the robot's app was built on another computer, so it has to be removed first. Add --force to do that (configs stay)."
+        "$ADB" uninstall "$APP" >/dev/null 2>&1 || true
+        out="$("$ADB" install "$dir/robot-app.apk" 2>&1)" || true
+      fi
+      grep -q Success <<<"$out" || die "install failed: $out"
+    fi
+    for f in "$dir"/configs/*.xml; do [[ -f "$f" ]] && "$ADB" push "$f" /sdcard/FIRST/ >/dev/null; done
+    "$ADB" shell am start -n "$RC_ACTIVITY" >/dev/null
+    echo "Restored $2."
+    ;;
   logs)
     shift; FILTER=()
     [[ "${1:-}" == "--errors" ]] && { FILTER=('*:E'); shift; }
@@ -132,6 +251,6 @@ case "${1:-}" in
     "$ADB" "$@"
     ;;
   *)
-    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2
+    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 2
     ;;
 esac

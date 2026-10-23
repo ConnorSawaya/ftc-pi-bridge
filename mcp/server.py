@@ -106,6 +106,47 @@ def logs(errors_only: bool = False, lines: int = 300) -> str:
 
 
 @mcp.tool()
+def health() -> str:
+    """Check the robot connection: Wi-Fi signal and channel, whether the robot app and adb answer,
+    and whether this is the same hub as before for this robot name (catches the wrong robot)."""
+    return run("health", ok=(0, 1), timeout=90)
+
+
+@mcp.tool()
+def speed_test() -> str:
+    """Measure the real upload speed to the robot in MB/s (sends 8 MB through adb, then deletes it)."""
+    return run("speedtest", timeout=120)
+
+
+@mcp.tool()
+def crashes(lines: int = 3000) -> str:
+    """Find crashes in the robot's recent log: uncaught exceptions in OpModes (with the line in
+    the team's code), stuck OpModes, and app crashes. Use this after an upload or when the
+    Driver Station shows an error."""
+    return run("crashes", str(lines), timeout=90)
+
+
+@mcp.tool()
+def backup() -> str:
+    """Save the robot's configs and app to this Mac (newest 5 per robot are kept).
+    Full uploads do this by themselves first."""
+    return run("backup", timeout=300)
+
+
+@mcp.tool()
+def list_backups() -> str:
+    """Backups on this Mac, newest first, as ROBOT/TIME."""
+    return run("backups")
+
+
+@mcp.tool()
+def restore_backup(backup: str) -> str:
+    """Put a backup's app and configs back on the robot. `backup` is ROBOT/TIME from list_backups.
+    Refuses if the backup is from a different hub; tell the user if so."""
+    return run("restore", backup, timeout=300)
+
+
+@mcp.tool()
 def open_panels() -> str:
     """Tunnel the robot's Panels dashboard to this Mac and return its address (http://localhost:8001).
 

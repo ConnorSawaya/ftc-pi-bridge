@@ -23,3 +23,7 @@ local.properties
 # Machine files
 .DS_Store
 xcuserdata/
+
+# Python caches
+__pycache__/
+*.pyc
