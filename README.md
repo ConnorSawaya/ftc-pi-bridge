@@ -81,7 +81,7 @@ ftc-bridge forget NAME          delete a saved robot
 ftc-bridge disconnect           take the Pi off the robot's Wi-Fi
 ftc-bridge reboot | shutdown    restart or shut down the Pi
 ftc-bridge update-pi            update the Pi's software from this Mac
-ftc-bridge pi-log               how the Pi's last run ended (shows what it was doing if it froze)
+ftc-bridge pi-log               how the Pi's last run ended (shows what it was doing if it froze), and how often the USB link went dead
 ftc-bridge key                  this computer's public key
 ftc-bridge add-key "KEY"        let another computer (e.g. a teammate's PC) use the Pi
 ftc-bridge health               signal, channel, robot app, adb, and whether it's the same hub as before
@@ -135,6 +135,7 @@ Paste this into your robot repo's `CLAUDE.md` / `AGENTS.md`:
 - **Before a match, disconnect the Pi** (⚙ → Disconnect from robot, `ftc-bridge disconnect`, or unplug it). Rule R704.C: only the Driver Station may be on the robot's Wi-Fi during a match.
 - **Shut down the Pi before unplugging it** (⚙ → Shut down Pi) to protect the SD card.
 - **Don't turn on macOS Internet Sharing for the Pi.** The Pi changes its address when you do.
+- **The USB link can go dead by itself** (seen with a Mac after about 25 minutes: the Pi keeps running, but the computer can't reach it until the cable is pulled). The Pi now catches that and re-plugs the link in software, back in about 30-40 s. `ftc-bridge pi-log` shows how often it happened.
 - **Debugging the Pi:** `ssh -i ~/.ssh/ftcpi ftc@10.12.194.1`
 
 ## What's in here

@@ -18,7 +18,8 @@ ftc-bridge health               Wi-Fi signal and channel, robot app, adb, and wh
 ftc-bridge speedtest            real upload speed to the robot
 ftc-bridge key                  this computer's public key (give it to whoever set up the Pi)
 ftc-bridge add-key "KEY"        let another computer use the Pi
-ftc-bridge pi-log [N]           how the Pi's previous run ended (a freeze ends without a shutdown)
+ftc-bridge pi-log [N]           how the Pi's previous run ended (a freeze ends without a shutdown), and
+                                how often the USB link to this computer went dead and was re-plugged
 ftc-bridge pi-version           the Pi's software version, and the one on this computer
 ftc-bridge update-pi            update the Pi's software from this computer
 
@@ -264,7 +265,8 @@ switch ($cmd) {
         $n = if ($arg1) { [int]$arg1 } else { 40 }
         # No double quotes in the remote command (Windows PowerShell 5.1 mangles them).
         $remote = "sudo journalctl -b -1 --no-pager -n $n -o short 2>/dev/null | grep . || echo 'No earlier run saved yet.'; " +
-                  "sudo journalctl -b -1 --no-pager -n 3 2>/dev/null | grep -q 'Journal stopped' && echo '(That run ended with a normal shutdown or restart.)' || echo '(That run ended suddenly: a freeze, a power cut, or the cable was pulled.)'"
+                  "sudo journalctl -b -1 --no-pager -n 3 2>/dev/null | grep -q 'Journal stopped' && echo '(That run ended with a normal shutdown or restart.)' || echo '(That run ended suddenly: a freeze, a power cut, or the cable was pulled.)'; " +
+                  "echo; sudo /usr/local/bin/ftc-hub links 2>/dev/null || true"
         $all = $SshOpts + @($Pi, $remote)
         & ssh @all
         if ($LASTEXITCODE -eq 255) { Die "can't reach the Pi. Is it plugged into this computer?" }

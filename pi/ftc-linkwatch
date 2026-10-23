@@ -1,0 +1,78 @@
+#!/bin/bash
+# Re-plugs the USB link to the computer when it goes dead.
+#
+# Seen 2026-10-23 with a Mac, after ~25 minutes of use: the computer stops reaching the Pi while both ends
+# still think the cable is connected. The Pi keeps running and usb0 keeps its carrier, but nothing gets
+# through, and nothing on the Pi notices, so it stays dead until the cable is pulled.
+#
+# Every PERIOD seconds this checks the computer still answers: a ping, or ARP, which a firewall can't block.
+# The computer is the newest DHCP lease on usb0. Once the computer has answered, if it stops answering for
+# DEAD_AFTER seconds while usb0 still says connected and the computer isn't asleep (USB "configured", not
+# "suspended"), this logs what it sees, then re-plugs the link in software. It unbinds and binds the USB
+# controller, so the computer sees the cable pulled and put back; the Pi keeps its power.
+#
+# It does this once per loss. If the computer doesn't come back, the watcher waits until the computer answers
+# again before it would do it again, so an unplugged or sleeping computer never makes it loop.
+# Everything goes to the journal as "ftc-linkwatch"; `ftc-hub links` (ftc-bridge pi-log) counts it.
+set -u
+IF=usb0
+PERIOD=5
+DEAD_AFTER=20
+GIVE_UP_AFTER=60
+LEASES=/var/lib/NetworkManager/dnsmasq-$IF.leases
+DRV=/sys/bus/platform/drivers/dwc2
+
+log() { logger -t ftc-linkwatch -- "$*"; }
+udc() { ls /sys/class/udc 2>/dev/null | head -n 1; }
+computer() { [ -r "$LEASES" ] && sort -rn "$LEASES" | awk 'NR == 1 { print $3 }'; }
+count() { local v; v="$(cat "/sys/class/net/$IF/statistics/$1" 2>/dev/null)"; echo "${v:-0}"; }
+answers() {
+  ping -c 1 -W 2 -I "$IF" "$1" >/dev/null 2>&1 || arping -q -c 1 -w 2 -I "$IF" "$1" >/dev/null 2>&1
+}
+
+replug() {
+  local u; u="$(udc)"
+  [ -n "$u" ] || { log "can't re-plug: no USB controller found"; return 1; }
+  echo "$u" > "$DRV/unbind" 2>/dev/null
+  sleep 2
+  echo "$u" > "$DRV/bind" 2>/dev/null
+  # (the USB gadget driver binds to the controller again by itself; if usb0 doesn't come back, reload it)
+  for _ in $(seq 1 10); do [ -e "/sys/class/net/$IF" ] && return 0; sleep 1; done
+  log "usb0 didn't come back after the re-plug: reloading the USB gadget driver"
+  modprobe -r g_ether 2>/dev/null; sleep 1; modprobe g_ether
+}
+
+log "watching the USB link: a check every ${PERIOD} s, a re-plug after ${DEAD_AFTER} s without an answer"
+seen=0; silent=0; replugged_at=0; replugs=0; rx_ok=0; tx_ok=0
+while true; do
+  sleep "$PERIOD"
+  carrier="$(cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo 0)"
+  u="$(udc)"; state="$(cat "/sys/class/udc/$u/state" 2>/dev/null || echo none)"
+  c="$(computer)"
+  if [ "$replugged_at" -gt 0 ] && [ $(( $(date +%s) - replugged_at )) -ge "$GIVE_UP_AFTER" ]; then
+    log "NOT BACK ${GIVE_UP_AFTER} s after the re-plug (USB $state, usb0 carrier $carrier): unplug the Pi and plug it back in"
+    replugged_at=0
+  fi
+  if [ "$carrier" != 1 ] || [ "$state" != configured ] || [ -z "$c" ]; then
+    silent=0; continue                       # unplugged, the computer asleep, or no computer yet: nothing to fix
+  fi
+  if answers "$c"; then
+    if [ "$replugged_at" -gt 0 ]; then
+      log "BACK: the computer ($c) answers again, $(( $(date +%s) - replugged_at )) s after the re-plug"
+      replugged_at=0
+    fi
+    seen=1; silent=0; rx_ok="$(count rx_packets)"; tx_ok="$(count tx_packets)"
+    continue
+  fi
+  [ "$seen" = 1 ] || continue
+  silent=$(( silent + PERIOD ))
+  [ "$silent" -ge "$DEAD_AFTER" ] || continue
+  replugs=$(( replugs + 1 ))
+  log "LINK DEAD: the computer ($c) hasn't answered for ${silent} s, but usb0 says connected (USB $state)." \
+      "Since it last answered: $(( $(count rx_packets) - rx_ok )) packets in, $(( $(count tx_packets) - tx_ok )) out;" \
+      "errors in $(count rx_errors) out $(count tx_errors), dropped in $(count rx_dropped) out $(count tx_dropped)." \
+      "Kernel: $(dmesg | tail -n 3 | tr '\n' '|')"
+  log "re-plugging the USB link (#$replugs this run)"
+  replug
+  replugged_at="$(date +%s)"; seen=0; silent=0
+done

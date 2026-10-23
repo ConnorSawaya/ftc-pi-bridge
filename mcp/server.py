@@ -301,8 +301,11 @@ async def read_telemetry(seconds: float = 3.0) -> str:
 
 @mcp.tool()
 def pi_log(lines: int = 40) -> str:
-    """How the Pi's previous run ended. If the Pi froze (the watchdog restarts it), the log ends
-    suddenly; the last lines show what it was doing."""
+    """How the Pi's previous run ended, and how often the USB link went dead and was re-plugged.
+
+    If the Pi froze (the watchdog restarts it), the log ends suddenly; the last lines show what it was
+    doing. The end of the output counts the dead USB links ftc-linkwatch caught in every saved run.
+    """
     return run("pi-log", str(lines))
 
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-plug the USB link to the computer when it goes dead (ftc-linkwatch)
+After=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/bin/ftc-linkwatch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

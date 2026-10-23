@@ -11,6 +11,8 @@
 #                             serial compared with the one saved for this robot (is it the right robot?)
 #   ftc-hub disconnect    ->  leaves the robot's Wi-Fi and stays off it (before a match: rule R704.C)
 #   ftc-hub power reboot|off  ->  restarts or shuts down the Pi (shut down before unplugging)
+#   ftc-hub links         ->  how often the USB link to the computer went dead and was re-plugged
+#                             (ftc-linkwatch), in every saved run, and the last few times
 set -euo pipefail
 HUB_IP=192.168.43.1
 PREFIX=robot-  # each robot is a NetworkManager connection called robot-<name>
@@ -127,7 +129,25 @@ PY
       *) echo "usage: ftc-hub power reboot|off" >&2; exit 2 ;;
     esac
     ;;
+  links)
+    systemctl is-active --quiet ftc-linkwatch && echo "USB link watcher: on" ||
+      echo "USB link watcher: OFF (ftc-bridge update-pi installs it)"
+    runs=0; dead=0; back=0; lost=0
+    while read -r idx _; do
+      runs=$((runs + 1))
+      ev="$(journalctl -b "$idx" -t ftc-linkwatch -q --no-pager 2>/dev/null || true)"
+      dead=$((dead + $(grep -c 'LINK DEAD' <<<"$ev" || true)))
+      back=$((back + $(grep -c 'BACK:' <<<"$ev" || true)))
+      lost=$((lost + $(grep -c 'NOT BACK' <<<"$ev" || true)))
+    done < <(journalctl --list-boots --no-pager -q 2>/dev/null)
+    echo "Dead links: $dead in the $runs saved runs ($back came back by themselves after the re-plug, $lost needed the cable pulled)"
+    # the last few, with how long the Pi had been running (minutes) when it happened
+    journalctl -t ftc-linkwatch -q --no-pager -o short-monotonic 2>/dev/null | grep -E 'LINK DEAD|BACK' | tail -n 6 |
+      awk '{ up = 0; if (match($0, /^\[ *[0-9.]+\]/)) up = substr($0, RSTART + 1, RLENGTH - 2) + 0
+             sub(/^.*ftc-linkwatch\[[0-9]+\]: /, "")
+             printf "  %3d min after the Pi started: %s\n", up / 60, substr($0, 1, 150) }'
+    ;;
   *)
-    echo "usage: ftc-hub status|scan|list|add NAME|use NAME|forget NAME|health|disconnect|power reboot|off" >&2; exit 2
+    echo "usage: ftc-hub status|scan|list|add NAME|use NAME|forget NAME|health|disconnect|power reboot|off|links" >&2; exit 2
     ;;
 esac
