@@ -287,10 +287,11 @@ struct Panel: View {
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var confirmShutdown = false
 
-    init(bridge: Bridge, page: Page = .main, adding: Bool = false) {
+    init(bridge: Bridge, page: Page = .main, adding: Bool = false, picked: String = "") {
         self.bridge = bridge
         _page = State(initialValue: page)
         _adding = State(initialValue: adding)
+        _ssid = State(initialValue: picked)
     }
 
     var body: some View {
@@ -410,14 +411,13 @@ struct Panel: View {
                     .disabled(bridge.busy)
             }
             networkPicker
-            Text("Pick your robot's Wi-Fi, or type its name below.")
-                .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
-            Group {
-                TextField("Wi-Fi name", text: $ssid)
-                SecureField("Wi-Fi password", text: $password)
-                TextField("Nickname (optional, e.g. comp)", text: $name)
+            if !ssid.isEmpty {
+                Group {
+                    SecureField("Password for \(ssid)", text: $password)
+                    TextField("Nickname (optional, e.g. comp)", text: $name)
+                }
+                .textFieldStyle(.roundedBorder)
             }
-            .textFieldStyle(.roundedBorder)
             HStack {
                 Button("Cancel") { closeForm() }
                     .buttonStyle(.borderless)

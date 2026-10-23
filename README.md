@@ -20,7 +20,7 @@ Mac ──USB──► Raspberry Pi Zero 2 W ──Wi-Fi──► Control Hub
 3. Put the card in the Pi. Plug the Pi's **middle** micro-USB port (labelled USB, not PWR) into the Mac. Wait ~3 minutes the first time.
 4. Build the menu bar app: `./mac/build.sh`, then open **FTC Bridge** from Applications.
 5. Put the terminal command on your PATH: `ln -sf "$PWD/ftc-bridge" ~/.local/bin/ftc-bridge`
-6. Save your robots: in the menu bar app, **Add robot**, pick your robot's Wi-Fi, type its password, **Save & Connect**. Or in the terminal: `ftc-bridge add comp 12345-RC` (asks for the password).
+6. Save your robots: in the menu bar app, **Add robot**, pick your robot from the list, type its Wi-Fi password, **Save & Connect**. Or in the terminal: `ftc-bridge add comp 12345-RC` (asks for the password).
 
 ## Every time
 1. Plug in the Pi and turn on the robot. The menu bar icon shows radio waves when it's connected.
