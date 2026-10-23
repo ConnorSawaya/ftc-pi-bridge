@@ -27,6 +27,39 @@ func execute(_ path: String, _ args: [String], input: String? = nil) async -> (o
     }
 }
 
+/// What the app noticed and did (the Pi coming and going, notifications sent and whether macOS allowed them), in
+/// ~/Library/Logs/ftc-bridge/app.log, for working out what happened later. Kept under about 1 MB.
+enum AppLog {
+    static let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/ftc-bridge/app.log")
+
+    static func write(_ line: String) {
+        let stamp = Date().formatted(.verbatim("\(year: .defaultDigits)-\(month: .twoDigits)-\(day: .twoDigits) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits)", timeZone: .current, calendar: .current))
+        let data = Data("\(stamp) \(line)\n".utf8)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 1_000_000 {
+            try? fm.removeItem(at: url.appendingPathExtension("1"))
+            try? fm.moveItem(at: url, to: url.appendingPathExtension("1"))
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    /// Whether macOS lets the app show notifications, and how.
+    static func notificationSettings() async -> String {
+        let s = await UNUserNotificationCenter.current().notificationSettings()
+        let auth = ["not asked yet", "denied", "allowed", "provisional", "ephemeral"]
+        let style = ["none", "banners", "alerts"]
+        let status = Int(s.authorizationStatus.rawValue), alert = Int(s.alertStyle.rawValue)
+        return "notifications: \(status < auth.count ? auth[status] : "\(status)"), style \(alert < style.count ? style[alert] : "\(alert)")"
+    }
+}
+
 enum Pi {
     static let login = "ftc@10.12.194.1"
     static let key = NSHomeDirectory() + "/.ssh/ftcpi"
@@ -41,6 +74,12 @@ enum Pi {
             "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
             login, "sudo", "/usr/local/bin/ftc-hub",
         ] + args, input: input)
+    }
+
+    /// Whether the Pi is plugged into this Mac at all, answering or not: its USB device is there
+    /// (Raspberry Pi's USB vendor ID, 0x2e8a = 11914).
+    static func pluggedIn() async -> Bool {
+        await execute("/usr/sbin/ioreg", ["-p", "IOUSB", "-l", "-w0"]).output.contains("\"idVendor\" = 11914")
     }
 }
 
@@ -206,6 +245,14 @@ final class Bridge: ObservableObject {
     private var adbRobot = ""          // robot adb is connected to, so a switch reconnects it
     private var seenCrashes: Set<String> = []
     private var crashBaselineRobot = ""  // crashes already in the log when we connected aren't alerted
+    // The Pi itself going away and coming back. Said once it's been gone piGoneAfter seconds, so one slow
+    // answer doesn't count. Gone but still plugged in is usually the USB link going dead; the Pi re-plugs it.
+    private static let piGoneAfter: TimeInterval = 10
+    private var piGoneSince: Date?
+    private var piGoneRobot = ""           // the robot it was connected to when it went
+    private var piGoneSaid = false
+    private var piWasUnplugged = false
+    private var piSeen = false             // answered at least once since the app started
 
     init() {
         Task {
@@ -286,19 +333,55 @@ final class Bridge: ObservableObject {
         } else if link != .connected {
             adbRobot = ""
         }
-        if checkedOnce && before != link {
+        if before != link || !checkedOnce { AppLog.write("link: \(checkedOnce ? "\(before)" : "(app started)") -> \(link)\(link == .noPi ? "" : " (robot \(robot.isEmpty ? "none" : robot))")") }
+        await notePiComingAndGoing(lostRobot: before == .connected ? robot : "")
+        if checkedOnce && before != link && before != .noPi && link != .noPi {   // (the Pi itself: just above)
             if link == .connected { notify("Connected to \(robot)", "Ready to upload.") }
             else if before == .connected { notify("Lost the robot", subtitle) }
         }
         checkedOnce = true
     }
 
+    /// "The Pi was unplugged" / "stopped answering" once it's been gone a while; "back" or "ready" when it answers.
+    private func notePiComingAndGoing(lostRobot: String) async {
+        if link == .noPi {
+            if piGoneSince == nil { piGoneSince = Date(); piGoneRobot = lostRobot }
+            guard piSeen, !piGoneSaid, let since = piGoneSince, Date().timeIntervalSince(since) >= Self.piGoneAfter else { return }
+            piGoneSaid = true
+            piWasUnplugged = !(await Pi.pluggedIn())
+            let robotToo = piGoneRobot.isEmpty ? "" : " Lost \(piGoneRobot) too."
+            if piWasUnplugged {
+                notify("The Pi was unplugged", "Plug its middle USB port into this Mac to use it again." + robotToo)
+            } else {
+                notify("The Pi stopped answering",
+                       "It's still plugged in. It re-plugs its USB link by itself within a minute; if it doesn't, unplug it and plug it back in." + robotToo)
+            }
+            return
+        }
+        defer { piGoneSince = nil; piGoneSaid = false; piSeen = true }
+        guard let since = piGoneSince, piGoneSaid || !piSeen else { return }   // (a short blip: nothing to say)
+        let robotNow = link == .connected ? "Connected to \(robot). Ready to upload." : robot.isEmpty ? "No robot chosen yet." : "\(robot) isn't answering yet."
+        if piGoneSaid && !piWasUnplugged {
+            notify("The Pi is back", "It was out for \(Int(Date().timeIntervalSince(since))) s. " + robotNow)
+        } else {
+            notify("The Pi is ready", robotNow)
+        }
+    }
+
     private func notify(_ title: String, _ body: String) {
-        guard UserDefaults.standard.bool(forKey: Prefs.notify) else { return }
+        guard UserDefaults.standard.bool(forKey: Prefs.notify) else {
+            AppLog.write("not notified (Notify on connection changes is off): \(title)")
+            return
+        }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { error in
+            Task {
+                let settings = await AppLog.notificationSettings()
+                AppLog.write("notified: \(title) -- \(error.map { "FAILED: \($0.localizedDescription)" } ?? "sent") (\(settings))")
+            }
+        }
     }
 
     func scan() async {
@@ -984,8 +1067,13 @@ struct FTCBridgeApp: App {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { LogRecorder.set(running: false) }
         }
-        if UserDefaults.standard.bool(forKey: Prefs.crashAlerts) {
-            Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
+        if UserDefaults.standard.bool(forKey: Prefs.crashAlerts) || UserDefaults.standard.bool(forKey: Prefs.notify) {
+            Task {
+                let allowed = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
+                AppLog.write("app started; asked for notifications: \(allowed ? "allowed" : "NOT allowed") (\(await AppLog.notificationSettings()))")
+            }
+        } else {
+            AppLog.write("app started; notifications off in its settings")
         }
     }
 
